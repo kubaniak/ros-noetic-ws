@@ -199,18 +199,27 @@ class PathPlanner:
         #Settings
         #node is a 3 by 1 node
         #point is a 2 by 1 point
-        print("TO DO: Implement a way to connect two already existing nodes (for rewiring).")
-        return np.zeros((3, self.num_substeps))
+        #Ignores the ending theta constraint as per the lab hint
+        return self.simulate_trajectory(node_i, point_f)
     
     def cost_to_come(self, trajectory_o):
-        #The cost to get to a node from lavalle 
-        print("TO DO: Implement a cost to come metric")
-        return 0
+        #The cost to get to a node from lavalle
+        #Path length: sum of Euclidean distances between consecutive trajectory points
+        diffs = np.diff(trajectory_o[:2, :], axis=1)
+        return np.sum(np.linalg.norm(diffs, axis=0))
     
     def update_children(self, node_id):
         #Given a node_id with a changed cost, update all connected nodes with the new cost
-        print("TO DO: Update the costs of connected nodes after rewiring.")
-        return
+        for child_id in self.nodes[node_id].children_ids:
+            #Recompute trajectory from this node to the child
+            trajectory = self.connect_node_to_point(
+                self.nodes[node_id].point,
+                self.nodes[child_id].point[:2]
+            )
+            #Update child cost = parent cost + edge cost
+            self.nodes[child_id].cost = self.nodes[node_id].cost + self.cost_to_come(trajectory)
+            #Recursively propagate to grandchildren
+            self.update_children(child_id)
 
     #Planner Functions
     def rrt_planning(self):
