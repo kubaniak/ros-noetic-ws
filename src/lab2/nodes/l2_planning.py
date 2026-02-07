@@ -10,6 +10,14 @@ from skimage.draw import disk
 from scipy.linalg import block_diag
 
 
+def normalize_angle(angle):
+    return np.arctan2(np.sin(angle), np.cos(angle))
+
+
+def heading(p1, p2):
+    return np.arctan2(p2[1] - p1[1], p2[0] - p1[0])
+
+
 def load_map(filename):
     im = mpimg.imread("../maps/" + filename)
     if len(im.shape) > 2:
@@ -50,17 +58,20 @@ class PathPlanner:
         self.bounds[1, 1] = self.map_settings_dict["origin"][1] + self.map_shape[0] * self.map_settings_dict["resolution"]
 
         #Robot information
-        self.robot_radius = 0.22 #m
-        self.vel_max = 0.5 #m/s (Feel free to change!)
-        self.rot_vel_max = 0.2 #rad/s (Feel free to change!)
+        self.robot_radius = 0.4 #m (inflated from 0.225 for safety margin)
+        self.vel_max = 0.15 #m/s (Feel free to change!)
+        self.rot_vel_max = 0.35 #rad/s (Feel free to change!)
+        self.min_dTheta_for_just_rotation = 0.8 * np.pi
+        self.min_dTheta_for_closest = 0.35 * np.pi
+        self.search_dist_around_node = 2  # sample within ±2m of frontier node
 
         #Goal Parameters
         self.goal_point = goal_point #m
         self.stopping_dist = stopping_dist #m
 
         #Trajectory Simulation Parameters
-        self.timestep = 0.5 #s (reduced from 1.0 to avoid large jumps)
-        self.num_substeps = 10
+        self.timestep = 3 #s
+        self.num_substeps = 20
 
         #Planning storage
         self.nodes = [Node(np.zeros((3,1)), -1, 0)]
@@ -78,29 +89,49 @@ class PathPlanner:
         return
 
     #Functions required for RRT
-    def sample_map_space(self):
+    def sample_map_space(self, bounds=None):
         #Return an [x,y] coordinate to drive the robot towards
-        #Goal biasing: 5% chance of sampling the goal directly
-        if np.random.random() < 0.05:
-            return self.goal_point.copy()
-        x = np.random.uniform(self.bounds[0, 0], self.bounds[0, 1])
-        y = np.random.uniform(self.bounds[1, 0], self.bounds[1, 1])
+        xmin, xmax = self.bounds[0, :]
+        ymin, ymax = self.bounds[1, :]
+        if bounds is not None:
+            xmin = max(xmin, bounds[0, 0])
+            xmax = min(xmax, bounds[0, 1])
+            ymin = max(ymin, bounds[1, 0])
+            ymax = min(ymax, bounds[1, 1])
+        x = np.random.uniform(xmin, xmax)
+        y = np.random.uniform(ymin, ymax)
         return np.array([[x], [y]])
     
     def check_if_duplicate(self, point):
         #Check if point is a duplicate of an already existing node
-        threshold = 0.1 #m
+        tol_pos = 2e-4  #m
+        tol_theta = np.pi * 0.01
+        point_flat = point.flatten()
         for node in self.nodes:
-            if np.linalg.norm(point[:2, 0] - node.point[:2, 0]) < threshold:
+            node_flat = node.point.flatten()
+            if (np.linalg.norm(point_flat[:2] - node_flat[:2]) < tol_pos and
+                abs(normalize_angle(point_flat[2] - node_flat[2])) < tol_theta):
                 return True
         return False
     
-    def closest_node(self, point):
+    def closest_node(self, point, consider_heading=True):
         #Returns the index of the closest node
         #point is a 2 by 1 vector [x; y]
-        all_points = np.hstack([n.point[:2] for n in self.nodes])  # 2 x N
-        dists = np.linalg.norm(all_points - point[:2], axis=0)
-        return int(np.argmin(dists))
+        min_dist = float("inf")
+        closest_id = 0
+        point_flat = point[:2].flatten()
+        for i, node in enumerate(self.nodes):
+            node_xy = node.point[:2, 0]
+            # Heading filter: skip nodes facing away from the sample point
+            if consider_heading:
+                theta_from_node = heading(node_xy, point_flat)
+                if abs(normalize_angle(theta_from_node - node.point[2, 0])) > self.min_dTheta_for_closest:
+                    continue
+            dist = np.linalg.norm(node_xy - point_flat)
+            if dist < min_dist:
+                min_dist = dist
+                closest_id = i
+        return closest_id
     
     def simulate_trajectory(self, node_i, point_s):
         #Simulates the non-holonomic motion of the robot.
@@ -108,53 +139,50 @@ class PathPlanner:
         #node_i is a 3 by 1 vector [x;y;theta] this can be used to construct the SE(2) matrix T_{OI} in course notation
         #point_s is the sampled point vector [x; y]
         vel, rot_vel = self.robot_controller(node_i, point_s)
-        robot_traj = self.trajectory_rollout(vel, rot_vel)
-
-        # Transform from local frame (origin at 0,0,0) to world frame (origin at node_i)
-        theta_i = node_i[2, 0]
-        cos_t = np.cos(theta_i)
-        sin_t = np.sin(theta_i)
-
-        world_traj = np.zeros_like(robot_traj)
-        world_traj[0, :] = cos_t * robot_traj[0, :] - sin_t * robot_traj[1, :] + node_i[0, 0]
-        world_traj[1, :] = sin_t * robot_traj[0, :] + cos_t * robot_traj[1, :] + node_i[1, 0]
-        world_traj[2, :] = robot_traj[2, :] + theta_i
-
-        return world_traj
+        return self.trajectory_rollout(vel, rot_vel, node_i)
     
     def robot_controller(self, node_i, point_s):
         #This controller determines the velocities that will nominally move the robot from node i to node s
         #Max velocities should be enforced
-        dx = point_s[0, 0] - node_i[0, 0]
-        dy = point_s[1, 0] - node_i[1, 0]
+        x_0, y_0, theta_0 = node_i.flatten()[:3]
+        x, y = point_s.flatten()[:2]
 
-        # Desired heading toward target
-        angle_to_target = np.arctan2(dy, dx)
-        # Angle error relative to current heading
-        angle_error = angle_to_target - node_i[2, 0]
-        # Normalize to [-pi, pi]
-        angle_error = (angle_error + np.pi) % (2 * np.pi) - np.pi
+        dx, dy = x - x_0, y - y_0
+        dist = np.sqrt(dx**2 + dy**2)
+        theta_target = np.arctan2(dy, dx)
+        dTheta = normalize_angle(theta_target - theta_0)
 
-        # Rotational velocity: proportional to angle error, clamped
-        rot_vel = np.clip(angle_error / self.timestep, -self.rot_vel_max, self.rot_vel_max)
-        # Linear velocity: scale by cos(angle_error) so robot slows when not facing target
-        vel = self.vel_max * np.clip(np.cos(angle_error), 0.0, 1.0)
+        # If facing very far from target, just rotate in place
+        if abs(dTheta) > self.min_dTheta_for_just_rotation:
+            vel = 0
+            rot_vel = self.rot_vel_max * np.sign(dTheta)
+        else:
+            # Proportional controller
+            K_v, K_w = 0.5, 1.0
+            vel = np.clip(K_v * dist, 0, self.vel_max)
+            rot_vel = np.clip(K_w * dTheta, -self.rot_vel_max, self.rot_vel_max)
 
         return vel, rot_vel
     
-    def trajectory_rollout(self, vel, rot_vel):
-        # Given your chosen velocities determine the trajectory of the robot for your given timestep
-        # The returned trajectory should be a series of points to check for collisions
-        # Simulates from (0, 0, 0) in the robot's local frame using unicycle kinematics
-        dt = self.timestep / self.num_substeps
-        traj = np.zeros((3, self.num_substeps))
-        x, y, theta = 0.0, 0.0, 0.0
-        for i in range(self.num_substeps):
-            x += vel * np.cos(theta) * dt
-            y += vel * np.sin(theta) * dt
-            theta += rot_vel * dt
-            traj[:, i] = [x, y, theta]
-        return traj
+    def trajectory_rollout(self, vel, rot_vel, starting_pose):
+        # Closed-form unicycle integration in world frame
+        # starting_pose is [x, y, theta] (3,1) or (3,)
+        t = np.linspace(0, self.timestep, self.num_substeps)
+        x_i, y_i, theta_i = np.array(starting_pose).flatten()
+
+        thetas = rot_vel * t
+        if rot_vel == 0:
+            xs = vel * t * np.cos(theta_i)
+            ys = vel * t * np.sin(theta_i)
+        else:
+            xs = (vel / rot_vel) * (np.sin(theta_i + rot_vel * t) - np.sin(theta_i))
+            ys = (vel / rot_vel) * (-np.cos(theta_i + rot_vel * t) + np.cos(theta_i))
+
+        xs = xs + x_i
+        ys = ys + y_i
+        thetas = normalize_angle(thetas + theta_i)
+
+        return np.vstack((xs, ys, thetas))
     
     def point_to_cell(self, point):
         #Convert a series of [x,y] points in the map to the indices for the corresponding cell in the occupancy map
@@ -196,11 +224,40 @@ class PathPlanner:
     
     def connect_node_to_point(self, node_i, point_f):
         #Given two nodes find the non-holonomic path that connects them
-        #Settings
-        #node is a 3 by 1 node
-        #point is a 2 by 1 point
-        #Ignores the ending theta constraint as per the lab hint
-        return self.simulate_trajectory(node_i, point_f)
+        #Turn-then-drive: rotate to face target, then drive straight to it
+        #node_i is a 3 by 1 node, point_f is a 2 by 1 point
+        x, y, theta = node_i.flatten()[:3]
+        x_f, y_f = point_f.flatten()[:2]
+        sec_per_step = self.timestep / self.num_substeps
+        vel_step = self.vel_max * sec_per_step
+        rot_step = self.rot_vel_max * sec_per_step
+
+        # Rotation phase: rotate to face target
+        target_heading = heading([x, y], [x_f, y_f])
+        heading_error = normalize_angle(target_heading - theta)
+        steps_to_rotate = max(int(np.ceil(abs(heading_error / rot_step))), 1)
+
+        traj_r = []
+        for _ in range(steps_to_rotate - 1):
+            theta += rot_step * np.sign(heading_error)
+            traj_r.append([x, y, theta])
+        theta = target_heading
+        traj_r.append([x, y, theta])
+        traj_r = np.array(traj_r).T
+
+        # Translation phase: drive straight to target
+        dist = np.hypot(x_f - x, y_f - y)
+        steps_to_translate = max(int(np.ceil(dist / vel_step)), 1)
+
+        traj_t = []
+        for _ in range(steps_to_translate - 1):
+            x += vel_step * np.cos(theta)
+            y += vel_step * np.sin(theta)
+            traj_t.append([x, y, theta])
+        traj_t.append([x_f, y_f, target_heading])
+        traj_t = np.array(traj_t).T
+
+        return np.hstack([traj_r, traj_t])
     
     def cost_to_come(self, trajectory_o):
         #The cost to get to a node from lavalle
@@ -221,41 +278,49 @@ class PathPlanner:
             #Recursively propagate to grandchildren
             self.update_children(child_id)
 
+    def is_ancestor(self, ancestor_id, node_id):
+        #Check if ancestor_id is an ancestor of node_id to prevent cycles
+        current = self.nodes[node_id].parent_id
+        while current > -1:
+            if current == ancestor_id:
+                return True
+            current = self.nodes[current].parent_id
+        return False
+
     #Planner Functions
     def rrt_planning(self):
         #This function performs RRT on the given map and robot
         #You do not need to demonstrate this function to the TAs, but it is left in for you to check your work
-        for i in range(10000): #Most likely need more iterations than this to complete the map!
-            #Sample map space
-            point = self.sample_map_space()
+        for i in range(1000000):
+            #Focused sampling: sample near the node closest to the goal
+            closest_to_goal_id = self.closest_node(self.goal_point, consider_heading=False)
+            near_x, near_y = self.nodes[closest_to_goal_id].point[:2, 0]
+            d = self.search_dist_around_node
+            bounds = np.array([[near_x - d, near_x + d],
+                               [near_y - d, near_y + d]])
+            # Every 20 iterations, sample near the goal itself
+            if i % 20 == 0:
+                gx, gy = self.goal_point.flatten()
+                bounds = np.array([[gx - 0.5, gx + 0.5],
+                                   [gy - 0.5, gy + 0.5]])
+            point = self.sample_map_space(bounds=bounds)
 
-            #Get the closest point
+            #Get the closest node
             closest_node_id = self.closest_node(point)
 
             #Simulate driving the robot towards the closest point
             trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, point)
 
-            #Check if trajectory stays within map bounds
-            if np.any(trajectory_o[0, :] < self.bounds[0, 0]) or \
-               np.any(trajectory_o[0, :] > self.bounds[0, 1]) or \
-               np.any(trajectory_o[1, :] < self.bounds[1, 0]) or \
-               np.any(trajectory_o[1, :] > self.bounds[1, 1]):
+            #Get new node from trajectory endpoint
+            new_point = trajectory_o[:, -1:].copy()
+
+            #Check if duplicate
+            if self.check_if_duplicate(new_point):
                 continue
 
             #Check for collisions along trajectory
             rows, cols = self.points_to_robot_circle(trajectory_o[:2, :])
             if len(rows) == 0 or not np.all(self.occupancy_map[rows, cols] > 0.5):
-                continue
-
-            #Get new node from trajectory endpoint
-            new_point = trajectory_o[:, -1:].copy()
-
-            #Skip if robot barely moved (e.g. pure rotation)
-            if np.linalg.norm(new_point[:2, 0] - self.nodes[closest_node_id].point[:2, 0]) < 0.01:
-                continue
-
-            #Check if duplicate
-            if self.check_if_duplicate(new_point):
                 continue
 
             #Add new node to tree
@@ -266,7 +331,7 @@ class PathPlanner:
             #Visualize
             self.window.add_point(new_point[:2].flatten(), radius=2)
 
-            if i % 100 == 0:
+            if i % 500 == 0 and i > 0:
                 print("RRT iteration %d, nodes: %d" % (i, len(self.nodes)))
 
             #Check if goal has been reached
@@ -279,31 +344,19 @@ class PathPlanner:
     
     def rrt_star_planning(self):
         #This function performs RRT* for the given map and robot
-        print(f"\n=== RRT* PLANNING DEBUG ===")
-        print(f"Start: {self.nodes[0].point.flatten()}")
-        print(f"Goal: {self.goal_point.flatten()}")
-        print(f"Distance to goal: {np.linalg.norm(self.nodes[0].point[:2] - self.goal_point):.2f}m")
-        print(f"Stopping distance: {self.stopping_dist}m")
-        print(f"Map bounds: x=[{self.bounds[0,0]:.1f}, {self.bounds[0,1]:.1f}], y=[{self.bounds[1,0]:.1f}, {self.bounds[1,1]:.1f}]")
-        print(f"Robot radius: {self.robot_radius}m")
-        print(f"Max vel: {self.vel_max}m/s, max rot: {self.rot_vel_max}rad/s")
-        print(f"Timestep: {self.timestep}s")
-
-        # Verify starting position is collision-free
-        start_cell = self.point_to_cell(self.nodes[0].point[:2, :])
-        start_rows, start_cols = self.points_to_robot_circle(self.nodes[0].point[:2, :])
-        if len(start_rows) > 0:
-            start_free = np.sum(self.occupancy_map[start_rows, start_cols] > 0.5)
-            print(f"Start position check: {start_free}/{len(start_rows)} pixels are free")
-            if start_free < len(start_rows):
-                print(f"  WARNING: Start position has obstacles!")
-        print(f"===========================\n")
-
-        iteration_stats = {'bounds': 0, 'collision': 0, 'small_move': 0, 'duplicate': 0, 'success': 0}
-
-        for i in range(10000): #Most likely need more iterations than this to complete the map!
-            #Sample
-            point = self.sample_map_space()
+        for i in range(1000000):
+            #Focused sampling: sample near the node closest to the goal
+            closest_to_goal_id = self.closest_node(self.goal_point, consider_heading=False)
+            near_x, near_y = self.nodes[closest_to_goal_id].point[:2, 0]
+            d = self.search_dist_around_node
+            bounds = np.array([[near_x - d, near_x + d],
+                               [near_y - d, near_y + d]])
+            # Every 20 iterations, sample near the goal itself
+            if i % 20 == 0:
+                gx, gy = self.goal_point.flatten()
+                bounds = np.array([[gx - 0.5, gx + 0.5],
+                                   [gy - 0.5, gy + 0.5]])
+            point = self.sample_map_space(bounds=bounds)
 
             #Closest Node
             closest_node_id = self.closest_node(point)
@@ -311,157 +364,75 @@ class PathPlanner:
             #Simulate trajectory
             trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, point)
 
-            #Check if trajectory stays within map bounds
-            if np.any(trajectory_o[0, :] < self.bounds[0, 0]) or \
-               np.any(trajectory_o[0, :] > self.bounds[0, 1]) or \
-               np.any(trajectory_o[1, :] < self.bounds[1, 0]) or \
-               np.any(trajectory_o[1, :] > self.bounds[1, 1]):
-                iteration_stats['bounds'] += 1
-                continue
-
-            #Check for Collision
-            rows, cols = self.points_to_robot_circle(trajectory_o[:2, :])
-            if len(rows) == 0 or not np.all(self.occupancy_map[rows, cols] > 0.5):
-                iteration_stats['collision'] += 1
-                continue
-
             #Get new node from trajectory endpoint
             new_point = trajectory_o[:, -1:].copy()
 
-            #Skip if robot barely moved (e.g. pure rotation)
-            if np.linalg.norm(new_point[:2, 0] - self.nodes[closest_node_id].point[:2, 0]) < 0.01:
-                iteration_stats['small_move'] += 1
-                continue
-
             #Check if duplicate
             if self.check_if_duplicate(new_point):
-                iteration_stats['duplicate'] += 1
                 continue
 
-            iteration_stats['success'] += 1
+            #Check for collisions along trajectory
+            rows, cols = self.points_to_robot_circle(trajectory_o[:2, :])
+            if len(rows) == 0 or not np.all(self.occupancy_map[rows, cols] > 0.5):
+                continue
 
-            #Last node rewire - find best parent within ball radius
+            #Find all nodes within ball radius for rewiring
             ball_rad = self.ball_radius()
-
-            # Find all nodes within ball radius
             all_points = np.hstack([n.point[:2] for n in self.nodes])
             dists = np.linalg.norm(all_points - new_point[:2], axis=0)
             near_node_ids = np.where(dists < ball_rad)[0].tolist()
 
-            # Find the best parent (minimum cost)
+            #Best parent selection
             best_parent_id = closest_node_id
             best_cost = self.nodes[closest_node_id].cost + self.cost_to_come(trajectory_o)
-            best_trajectory = trajectory_o
 
             for near_id in near_node_ids:
-                # Try to connect from this near node to new point
                 traj = self.connect_node_to_point(self.nodes[near_id].point, new_point[:2])
-
-                # Check bounds
-                if np.any(traj[0, :] < self.bounds[0, 0]) or \
-                   np.any(traj[0, :] > self.bounds[0, 1]) or \
-                   np.any(traj[1, :] < self.bounds[1, 0]) or \
-                   np.any(traj[1, :] > self.bounds[1, 1]):
-                    continue
-
-                # Check collision
                 rows, cols = self.points_to_robot_circle(traj[:2, :])
                 if len(rows) == 0 or not np.all(self.occupancy_map[rows, cols] > 0.5):
                     continue
-
-                # Calculate cost through this node
                 cost = self.nodes[near_id].cost + self.cost_to_come(traj)
-
                 if cost < best_cost:
                     best_parent_id = near_id
                     best_cost = cost
-                    best_trajectory = traj
 
-            # Add new node with best parent
+            #Add new node with best parent
             new_node = Node(new_point, best_parent_id, best_cost)
             new_node_id = len(self.nodes)
             self.nodes[best_parent_id].children_ids.append(new_node_id)
             self.nodes.append(new_node)
 
-            #Close node rewire - check if nearby nodes can improve by using new node as parent
+            #Rewire nearby nodes through new node
             for near_id in near_node_ids:
                 if near_id == best_parent_id:
                     continue
-
-                # Try to connect from new node to this near node
-                traj = self.connect_node_to_point(new_point, self.nodes[near_id].point[:2])
-
-                # Check bounds
-                if np.any(traj[0, :] < self.bounds[0, 0]) or \
-                   np.any(traj[0, :] > self.bounds[0, 1]) or \
-                   np.any(traj[1, :] < self.bounds[1, 0]) or \
-                   np.any(traj[1, :] > self.bounds[1, 1]):
+                #Cycle detection: skip if near_id is ancestor of new_node
+                if self.is_ancestor(near_id, new_node_id):
                     continue
-
-                # Check collision
+                traj = self.connect_node_to_point(new_point, self.nodes[near_id].point[:2])
                 rows, cols = self.points_to_robot_circle(traj[:2, :])
                 if len(rows) == 0 or not np.all(self.occupancy_map[rows, cols] > 0.5):
                     continue
-
-                # Calculate cost through new node
                 new_cost = new_node.cost + self.cost_to_come(traj)
-
-                # If better, rewire
                 if new_cost < self.nodes[near_id].cost:
-                    # Remove from old parent's children
                     old_parent_id = self.nodes[near_id].parent_id
                     self.nodes[old_parent_id].children_ids.remove(near_id)
-
-                    # Set new parent
                     self.nodes[near_id].parent_id = new_node_id
                     self.nodes[near_id].cost = new_cost
                     new_node.children_ids.append(near_id)
-
-                    # Update all children costs recursively
                     self.update_children(near_id)
 
             #Visualize
             self.window.add_point(new_point[:2].flatten(), radius=2)
 
-            if i % 100 == 0:
-                success_rate = 100 * iteration_stats['success'] / max(i, 1)
-                print(f"RRT* iter {i}: nodes={len(self.nodes)}, ball_r={ball_rad:.3f}, success_rate={success_rate:.1f}%")
-                print(f"  Stats: bounds={iteration_stats['bounds']}, collision={iteration_stats['collision']}, " +
-                      f"small_move={iteration_stats['small_move']}, duplicate={iteration_stats['duplicate']}")
-                # Show current best path to goal
-                closest_to_goal = min(range(len(self.nodes)),
-                                     key=lambda j: np.linalg.norm(self.nodes[j].point[:2] - self.goal_point))
-                dist = np.linalg.norm(self.nodes[closest_to_goal].point[:2] - self.goal_point)
-                print(f"  Closest node to goal: {closest_to_goal} at distance {dist:.2f}m")
-
-                # Debug: show a sample trajectory
-                if i == 100:
-                    print(f"\n  DEBUG: Sample trajectory analysis at iteration {i}:")
-                    sample_pt = self.sample_map_space()
-                    closest_id = self.closest_node(sample_pt)
-                    print(f"    Sampled point: ({sample_pt[0,0]:.2f}, {sample_pt[1,0]:.2f})")
-                    print(f"    Closest node {closest_id}: {self.nodes[closest_id].point.flatten()}")
-                    traj = self.simulate_trajectory(self.nodes[closest_id].point, sample_pt)
-                    print(f"    Trajectory: start={traj[:2,0].flatten()}, end={traj[:2,-1].flatten()}")
-                    print(f"    Trajectory length: {self.cost_to_come(traj):.3f}m")
-                    rows, cols = self.points_to_robot_circle(traj[:2, :])
-                    if len(rows) > 0:
-                        free_pixels = np.sum(self.occupancy_map[rows, cols] > 0.5)
-                        print(f"    Collision check: {free_pixels}/{len(rows)} pixels are free")
-                    print()
+            if i % 500 == 0 and i > 0:
+                print(f"RRT* iter {i}: nodes={len(self.nodes)}")
 
             #Check for early end
             dist_to_goal = np.linalg.norm(new_point[:2] - self.goal_point)
             if dist_to_goal < self.stopping_dist:
-                print(f"\n*** RRT*: GOAL REACHED at iteration {i} with {len(self.nodes)} nodes! ***")
-                print(f"Final node: {new_point.flatten()}")
-                print(f"Distance to goal: {dist_to_goal:.3f}m")
+                print(f"RRT*: Goal reached at iteration {i} with {len(self.nodes)} nodes!")
                 break
-
-        if i == 9999:
-            print(f"\n*** RRT*: Max iterations reached without finding goal ***")
-            print(f"Total nodes created: {len(self.nodes)}")
-            print(f"Closest distance to goal: {min(np.linalg.norm(n.point[:2] - self.goal_point) for n in self.nodes):.2f}m")
 
         return self.nodes
     
