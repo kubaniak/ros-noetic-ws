@@ -451,7 +451,7 @@ def main():
     node_path_metric = np.hstack(path_planner.recover_path())
 
     #Leftover test functions
-    np.save("shortest_path.npy", node_path_metric)
+    np.save("path.npy", node_path_metric)
 
 
 if __name__ == '__main__':

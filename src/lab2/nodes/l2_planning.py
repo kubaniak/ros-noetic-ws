@@ -257,7 +257,7 @@ class PathPlanner:
             #Visualize
             self.window.add_point(new_point[:2].flatten(), radius=2)
 
-            if i % 500 == 0:
+            if i % 100 == 0:
                 print("RRT iteration %d, nodes: %d" % (i, len(self.nodes)))
 
             #Check if goal has been reached
@@ -317,7 +317,7 @@ def main():
     node_path_metric = np.hstack(path_planner.recover_path())
 
     #Leftover test functions
-    np.save("shortest_path.npy", node_path_metric)
+    np.save("path.npy", node_path_metric)
 
 
 if __name__ == '__main__':

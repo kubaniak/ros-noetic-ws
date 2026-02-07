@@ -42,13 +42,13 @@ def main():
         node_path_metric = np.hstack(path)
 
         # Save path
-        np.save("shortest_path.npy", node_path_metric)
+        np.save("path.npy", node_path_metric)
 
         print("-" * 60)
         print(f"\n✓ Path planning complete!")
         print(f"  Total nodes created: {len(nodes)}")
         print(f"  Path length: {len(path)} waypoints")
-        print(f"  Path saved to: shortest_path.npy")
+        print(f"  Path saved to: path.npy")
         print(f"  Path shape: {node_path_metric.shape}")
 
         # Print first and last few waypoints
