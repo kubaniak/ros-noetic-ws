@@ -63,3 +63,18 @@ RUN echo "source /usr/share/gazebo/setup.bash" >> /home/lcas/.bashrc \
 
 # add commit history to bust cache if and when needed.
 ADD "https://api.github.com/repos/LCAS/cmp9764/commits?per_page=1&sha=main" .lcas_addons.commits
+
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN cd /usr/local/bin && \
+    ln -s /usr/bin/python3 python && \
+    ln -s /usr/bin/pip3 pip
+
+RUN pip install --no-cache-dir \
+    pygame \
+    scikit-image 
+
+ENTRYPOINT ["python3"]
