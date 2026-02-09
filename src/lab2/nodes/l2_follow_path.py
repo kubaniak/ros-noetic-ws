@@ -17,17 +17,17 @@ from visualization_msgs.msg import Marker
 import utils
 
 
-TRANS_GOAL_TOL = .1  # m, tolerance to consider a goal complete
+TRANS_GOAL_TOL = .2  # m, tolerance to consider a goal complete
 ROT_GOAL_TOL = .3  # rad, tolerance to consider a goal complete
-TRANS_VEL_OPTS = [0, 0.025, 0.13, 0.26]  # m/s, max of real robot is .26
-ROT_VEL_OPTS = np.linspace(-1.82, 1.82, 11)  # rad/s, max of real robot is 1.82
+TRANS_VEL_OPTS = [0, 0.13, 0.26]  # m/s, max of real robot is .26
+ROT_VEL_OPTS = np.linspace(-1.82, 1.82, 31)  # rad/s, max of real robot is 1.82
 CONTROL_RATE = 5  # Hz, how frequently control signals are sent
 CONTROL_HORIZON = 5  # seconds. if this is set too high and INTEGRATION_DT is too low, code will take a long time to run!
 INTEGRATION_DT = .025  # s, delta t to propagate trajectories forward by
 COLLISION_RADIUS = 0.225  # m, radius from base_link to use for collisions, min of 0.2077 based on dimensions of .281 x .306
 ROT_DIST_MULT = .1  # multiplier to change effect of rotational distance in choosing correct control
 OBS_DIST_MULT = .1  # multiplier to change the effect of low distance to obstacles on a path
-MIN_TRANS_DIST_TO_USE_ROT = 1.0  # m, robot starts caring about rotation when within this distance (increased from TRANS_GOAL_TOL)
+MIN_TRANS_DIST_TO_USE_ROT = 2.5  # m, robot starts caring about rotation when within this distance (increased from TRANS_GOAL_TOL)
 PATH_NAME = 'path.npy'  # saved path from l2_planning.py, should be in the same directory as this file
 
 # here are some hardcoded paths to use if you want to develop l2_planning and this file in parallel
@@ -162,72 +162,38 @@ class PathFollower():
             # check all trajectory points for collisions
             # first find the closest collision point in the map to each local path point
             local_paths_pixels = (self.map_origin[:2] + local_paths[:, :, :2]) / self.map_resolution
-            valid_opts = list(range(self.num_opts))
-            local_paths_lowest_collision_dist = np.ones(self.num_opts) * 50
-
-            collision_check_start = rospy.Time.now()
-            num_collision = 0
-            num_bounds = 0
-
-            # OPTIMIZED: Check collisions more efficiently
-            # Instead of checking distance to ALL obstacles for every point,
-            # we only check if the point is occupied or near boundary
-            for opt in range(local_paths_pixels.shape[1]):
-                min_dist = 50.0
-                collision_detected = False
-
-                for timestep in range(local_paths_pixels.shape[0]):
-                    # Get the pixel coordinates for this point
-                    x_pix = int(round(local_paths_pixels[timestep, opt, 0]))
-                    y_pix = int(round(local_paths_pixels[timestep, opt, 1]))
-
-                    # Check if within map bounds
-                    if x_pix < 0 or x_pix >= self.map_np.shape[1] or y_pix < 0 or y_pix >= self.map_np.shape[0]:
-                        # Out of bounds - set collision distance to 0
-                        local_paths_lowest_collision_dist[opt] = 0
-                        collision_detected = True
-                        num_bounds += 1
-                        break
-
-                    # If occupied (non-zero in map), collision distance is 0
-                    if self.map_np[y_pix, x_pix] != 0:
-                        local_paths_lowest_collision_dist[opt] = 0
-                        collision_detected = True
-                        num_collision += 1
-                        break
-
-                    # For free space, estimate distance to obstacles using a subset of nearby obstacles
-                    # This is much faster than checking all obstacles
-                    # We only update min_dist if we have time, but for collision detection
-                    # we just need to know if distance < collision_radius
-
-                if not collision_detected:
-                    # Trajectory is collision-free, estimate minimum distance to obstacles
-                    # Sample a few points along trajectory instead of all points
-                    sample_indices = [0, len(local_paths_pixels)//2, len(local_paths_pixels)-1]
-                    for idx in sample_indices:
-                        x_pix = int(round(local_paths_pixels[idx, opt, 0]))
-                        y_pix = int(round(local_paths_pixels[idx, opt, 1]))
-                        if 0 <= x_pix < self.map_np.shape[1] and 0 <= y_pix < self.map_np.shape[0]:
-                            # Quick distance check to nearest obstacles (sample subset)
-                            point_pix = np.array([y_pix, x_pix])
-                            if self.map_nonzero_idxes.size > 0:
-                                # Only check nearby obstacles (within 50 pixel radius)
-                                nearby_mask = np.abs(self.map_nonzero_idxes - point_pix).max(axis=1) < 50
-                                if nearby_mask.any():
-                                    nearby_obstacles = self.map_nonzero_idxes[nearby_mask]
-                                    dists = np.linalg.norm(nearby_obstacles - point_pix, axis=1)
-                                    min_dist = min(min_dist, np.min(dists))
-
-                    local_paths_lowest_collision_dist[opt] = min_dist
-
-            collision_check_time = (rospy.Time.now() - collision_check_start).to_sec()
-            print(f"Collision check took {collision_check_time:.3f}s")
-            print(f"  Rejected: {num_collision} collision, {num_bounds} out-of-bounds")
+            # OPTIMIZED: Vectorized Collision Checking
+            # Convert float pixels to integer indices once
+            x_idx = np.rint(local_paths_pixels[:, :, 0]).astype(int)
+            y_idx = np.rint(local_paths_pixels[:, :, 1]).astype(int)
+            
+            # Check bounds efficiently
+            valid_x = (x_idx >= 0) & (x_idx < self.map_np.shape[1])
+            valid_y = (y_idx >= 0) & (y_idx < self.map_np.shape[0])
+            valid_mask = valid_x & valid_y
+            
+            # Initialize distances to infinity
+            local_paths_lowest_collision_dist = np.full(self.num_opts, 50.0)
+            
+            # Any trajectory that goes out of bounds is invalid (dist = 0)
+            out_of_bounds = ~np.all(valid_mask, axis=0)
+            local_paths_lowest_collision_dist[out_of_bounds] = 0.0
+            
+            # Check collisions for valid points
+            # We clip indices just to safely index the map, even if we marked them invalid already
+            x_safe = np.clip(x_idx, 0, self.map_np.shape[1]-1)
+            y_safe = np.clip(y_idx, 0, self.map_np.shape[0]-1)
+            
+            # Check if any point in trajectory hits an obstacle
+            # map_np is 100 for obstacle, 0 for free. 
+            collisions = (self.map_np[y_safe, x_safe] > 0)
+            
+            # If any point in a trajectory collides, mark trajectory as collided
+            traj_collides = np.any(collisions & valid_mask[:, :, None].T if len(collisions.shape)>2 else collisions, axis=0)
+            local_paths_lowest_collision_dist[traj_collides] = 0.0
 
             # Remove trajectories with collisions (collision distance less than collision radius)
-            valid_opts = [opt for opt in valid_opts if local_paths_lowest_collision_dist[opt] >= self.collision_radius_pix]
-            print(f"Valid trajectories after filtering: {len(valid_opts)}/{self.num_opts}")
+            valid_opts = np.where(local_paths_lowest_collision_dist > 0)[0]
 
             # Calculate the final cost and choose the best control option
             if len(valid_opts) == 0:
@@ -236,59 +202,33 @@ class PathFollower():
                 final_cost = np.zeros(0)
             else:
                 final_cost = np.zeros(len(valid_opts))
-                for i, opt in enumerate(valid_opts):
-                    # Cost is based on distance to current goal
-                    final_position = local_paths[-1, opt, :2]
-                    dist_to_goal = np.linalg.norm(final_position - self.cur_goal[:2])
+                
+                # Vectorized Cost Calculation
+                valid_paths_end = local_paths[-1, valid_opts]
+                
+                # Translation Cost
+                dist_to_goal = np.linalg.norm(valid_paths_end[:, :2] - self.cur_goal[:2], axis=1)
+                
+                # Rotation Cost logic
+                rot_cost = np.zeros_like(dist_to_goal)
+                
+                # Calculate angle difference
+                diff = valid_paths_end[:, 2] - self.cur_goal[2]
+                abs_angle_diff = np.abs(np.arctan2(np.sin(diff), np.cos(diff)))
+                
+                # Apply rotation cost only where translation is close enough
+                mask_close = dist_to_goal < MIN_TRANS_DIST_TO_USE_ROT
+                rot_cost[mask_close] = ROT_DIST_MULT * abs_angle_diff[mask_close]
 
-                    # Add rotational distance if close enough translationally
-                    rot_cost = 0
-                    if dist_to_goal < MIN_TRANS_DIST_TO_USE_ROT:
-                        final_theta = local_paths[-1, opt, 2]
-                        abs_angle_diff = np.abs(final_theta - self.cur_goal[2])
-                        rot_dist = min(np.pi * 2 - abs_angle_diff, abs_angle_diff)
-                        rot_cost = ROT_DIST_MULT * rot_dist
-                        dist_to_goal += rot_cost
-
-                    # Penalize being close to obstacles
-                    obs_cost = OBS_DIST_MULT / (local_paths_lowest_collision_dist[opt] + 1e-6)
-
-                    final_cost[i] = dist_to_goal + obs_cost
-
-                # Show top 3 best options
-                sorted_indices = np.argsort(final_cost)[:3]
-                print(f"Top 3 control options (MIN_TRANS_DIST_TO_USE_ROT={MIN_TRANS_DIST_TO_USE_ROT}m):")
-                for rank, idx in enumerate(sorted_indices):
-                    opt = valid_opts[idx]
-                    v, w = self.all_opts[opt]
-                    end_pos = local_paths[-1, opt]
-                    cost = final_cost[idx]
-
-                    # Calculate components for this option
-                    end_dist = np.linalg.norm(end_pos[:2] - self.cur_goal[:2])
-                    end_theta = end_pos[2]
-                    abs_angle_diff = np.abs(end_theta - self.cur_goal[2])
-                    rot_dist = min(np.pi * 2 - abs_angle_diff, abs_angle_diff)
-                    rot_cost_val = ROT_DIST_MULT * rot_dist if end_dist < MIN_TRANS_DIST_TO_USE_ROT else 0
-                    obs_cost_val = OBS_DIST_MULT / (local_paths_lowest_collision_dist[opt] + 1e-6)
-
-                    print(f"  {rank+1}. v={v:.3f}, w={w:.3f} -> pos=({end_pos[0]:.2f},{end_pos[1]:.2f}), " +
-                          f"theta={end_pos[2]:.2f}rad, dist={end_dist:.3f}m, rot_err={rot_dist:.3f}rad, " +
-                          f"rot_cost={rot_cost_val:.4f}, obs_cost={obs_cost_val:.4f}, total={cost:.3f}")
-
-                # Show if rotation is being considered
-                if dist_to_goal < MIN_TRANS_DIST_TO_USE_ROT:
-                    print(f"  -> Rotation cost IS being considered (dist {dist_to_goal:.3f}m < {MIN_TRANS_DIST_TO_USE_ROT}m)")
-                else:
-                    print(f"  -> Rotation cost NOT considered (dist {dist_to_goal:.3f}m >= {MIN_TRANS_DIST_TO_USE_ROT}m)")
+                # We removed obs_cost calculation for speed since we aren't computing exact distances
+                final_cost = dist_to_goal + rot_cost
 
             if final_cost.size == 0:  # hardcoded recovery if all options have collision
                 control = [-.1, 0]
-                print(f"Selected RECOVERY control: v={control[0]}, w={control[1]}")
             else:
-                best_opt = valid_opts[final_cost.argmin()]
+                best_opt_idx = final_cost.argmin()
+                best_opt = valid_opts[best_opt_idx]
                 control = self.all_opts[best_opt]
-                print(f"Selected BEST control: v={control[0]:.3f}, w={control[1]:.3f} (option {best_opt})")
                 self.local_path_pub.publish(utils.se2_pose_list_to_path(local_paths[:, best_opt], 'map'))
 
             # send command to robot
@@ -296,9 +236,11 @@ class PathFollower():
 
             # uncomment out for debugging if necessary
             loop_time = (rospy.Time.now() - tic).to_sec()
-            print(f"Total loop time: {loop_time:.3f}s (should be < {1/CONTROL_RATE:.3f}s)")
+            # print(f"Total loop time: {loop_time:.3f}s (should be < {1/CONTROL_RATE:.3f}s)")
             if loop_time > 1/CONTROL_RATE:
-                print("WARNING: Loop time exceeds control rate! Robot control will be delayed.")
+                print(f"WARNING: Loop time {loop_time:.3f}s exceeds control rate!")
+            else:
+                print(f"Loop time {loop_time:.3f}s within control rate.")
 
             self.rate.sleep()
 
@@ -315,12 +257,23 @@ class PathFollower():
     def check_and_update_goal(self):
         # iterate the goal if necessary
         dist_from_goal = np.linalg.norm(self.pose_in_map_np[:2] - self.cur_goal[:2])
-        abs_angle_diff = np.abs(self.pose_in_map_np[2] - self.cur_goal[2])
-        rot_dist_from_goal = min(np.pi * 2 - abs_angle_diff, abs_angle_diff)
-        if dist_from_goal < TRANS_GOAL_TOL and rot_dist_from_goal < ROT_GOAL_TOL:
+        diff = self.pose_in_map_np[2] - self.cur_goal[2]
+        rot_dist_from_goal = np.abs(np.arctan2(np.sin(diff), np.cos(diff)))
+        
+        # Check if this is the final goal in the path
+        is_final_goal = (self.cur_path_index == len(self.path_tuples) - 1)
+        
+        # Intermediate goals: only care about translation distance
+        # Final goal: care about both translation and rotation
+        if is_final_goal:
+            goal_reached = (dist_from_goal < 0.1 and rot_dist_from_goal < ROT_GOAL_TOL)
+        else:
+            goal_reached = (dist_from_goal < TRANS_GOAL_TOL)
+
+        if goal_reached:
             rospy.loginfo("Goal {goal} at {pose} complete.".format(
                     goal=self.cur_path_index, pose=self.cur_goal))
-            if self.cur_path_index == len(self.path_tuples) - 1:
+            if is_final_goal:
                 rospy.loginfo("Full path complete in {time}s! Path Follower node shutting down.".format(
                     time=(rospy.Time.now() - self.path_follow_start_time).to_sec()))
                 rospy.signal_shutdown("Full path complete! Path Follower node shutting down.")

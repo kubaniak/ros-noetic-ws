@@ -4,6 +4,7 @@ import numpy as np
 import yaml
 import pygame
 import time
+from tqdm import trange
 import pygame_utils
 import matplotlib.image as mpimg
 from skimage.draw import disk
@@ -63,7 +64,7 @@ class PathPlanner:
         self.rot_vel_max = 0.35 #rad/s (Feel free to change!)
         self.min_dTheta_for_just_rotation = 0.8 * np.pi
         self.min_dTheta_for_closest = 0.35 * np.pi
-        self.search_dist_around_node = 2  # sample within ±2m of frontier node
+        self.search_dist_around_node = 3.5  # sample within ±3.5m of frontier node
 
         #Goal Parameters
         self.goal_point = goal_point #m
@@ -75,6 +76,26 @@ class PathPlanner:
 
         #Planning storage
         self.nodes = [Node(np.zeros((3,1)), -1, 0)]
+        
+        # Pre-allocate array for fast lookup: [x, y, theta]
+        # We start with size 10,000 and can resize if needed, or set to expected max iterations
+        self.max_nodes = 1000000
+        self.node_coords = np.zeros((self.max_nodes, 3))
+        # Initialize first node (0,0,0)
+        self.node_coords[0] = np.zeros(3)
+        self.num_nodes = 1
+        
+        # Optimization: Track node closest to goal to avoid O(N) search every step
+        self.closest_to_goal_id = 0
+        self.min_goal_dist = np.linalg.norm(self.nodes[0].point[:2] - self.goal_point)
+
+        # Optimization: Pre-compute disk footprint for collision checking
+        radius_pixels = int(np.ceil(self.robot_radius / self.map_settings_dict["resolution"]))
+        self.disk_rr, self.disk_cc = disk((0, 0), radius_pixels)
+        
+        # Density Control Parameters
+        self.density_radius = 1.5  # Check density within 1.5m radius
+        self.max_density = 50       # Max 50 nodes allowed in that radius
 
         #RRT* Specific Parameters
         self.lebesgue_free = np.sum(self.occupancy_map) * self.map_settings_dict["resolution"] **2
@@ -102,36 +123,55 @@ class PathPlanner:
         y = np.random.uniform(ymin, ymax)
         return np.array([[x], [y]])
     
-    def check_if_duplicate(self, point):
-        #Check if point is a duplicate of an already existing node
-        tol_pos = 2e-4  #m
-        tol_theta = np.pi * 0.01
-        point_flat = point.flatten()
-        for node in self.nodes:
-            node_flat = node.point.flatten()
-            if (np.linalg.norm(point_flat[:2] - node_flat[:2]) < tol_pos and
-                abs(normalize_angle(point_flat[2] - node_flat[2])) < tol_theta):
-                return True
+    def check_if_duplicate(self, point, parent_id):
+        # Optimization: Only check if we haven't moved significantly from the parent
+        # Checking against ALL nodes is O(N) and causes massive slowdowns.
+        parent_point = self.node_coords[parent_id]
+        dist = np.linalg.norm(parent_point[:2] - point[:2].flatten())
+        if dist < 0.05: # If moved less than 5cm, consider duplicate
+            return True
         return False
+    
+    def check_density(self, point):
+        # Checks if adding 'point' would exceed local density limit
+        # Returns True if density is TOO HIGH (reject point), False otherwise
+        
+        active_coords = self.node_coords[:self.num_nodes]
+        dists = np.linalg.norm(active_coords[:, :2] - point[:2].flatten(), axis=1)
+        
+        # Count how many existing nodes are within density_radius
+        count = np.sum(dists < self.density_radius)
+        
+        if count >= self.max_density:
+            return True # Reject: Too dense here
+        return False # Accept: Sparse enough
     
     def closest_node(self, point, consider_heading=True):
         #Returns the index of the closest node
         #point is a 2 by 1 vector [x; y]
-        min_dist = float("inf")
-        closest_id = 0
-        point_flat = point[:2].flatten()
-        for i, node in enumerate(self.nodes):
-            node_xy = node.point[:2, 0]
-            # Heading filter: skip nodes facing away from the sample point
-            if consider_heading:
-                theta_from_node = heading(node_xy, point_flat)
-                if abs(normalize_angle(theta_from_node - node.point[2, 0])) > self.min_dTheta_for_closest:
-                    continue
-            dist = np.linalg.norm(node_xy - point_flat)
-            if dist < min_dist:
-                min_dist = dist
-                closest_id = i
-        return closest_id
+        
+        active_coords = self.node_coords[:self.num_nodes]
+        xy = active_coords[:, :2]
+        thetas = active_coords[:, 2]
+        p_flat = point[:2].flatten()
+        
+        # Distance to all nodes
+        dists = np.linalg.norm(xy - p_flat, axis=1)
+        
+        if consider_heading:
+            # Vectorized heading calculation
+            dx = p_flat[0] - xy[:, 0]
+            dy = p_flat[1] - xy[:, 1]
+            headings = np.arctan2(dy, dx)
+            
+            # Heading filter
+            angle_diffs = np.abs(normalize_angle(headings - thetas))
+            invalid_mask = angle_diffs > self.min_dTheta_for_closest
+            
+            # Set invalid nodes to infinity distance so they aren't picked
+            dists[invalid_mask] = np.inf
+            
+        return np.argmin(dists)
     
     def simulate_trajectory(self, node_i, point_s):
         #Simulates the non-holonomic motion of the robot.
@@ -206,14 +246,15 @@ class PathPlanner:
 
         cells = self.point_to_cell(points)
 
-        all_rows = []
-        all_cols = []
-        for i in range(cells.shape[1]):
-            rr, cc = disk((cells[0, i], cells[1, i]), radius_pixels, shape=self.occupancy_map.shape)
-            all_rows.append(rr)
-            all_cols.append(cc)
+        # Broadcast cells against disk offsets
+        # cells shape: (2, N_points), disk shape: (N_disk,)
+        # result shape: (N_disk * N_points,)
+        rr = (cells[0, :, None] + self.disk_rr[None, :]).flatten()
+        cc = (cells[1, :, None] + self.disk_cc[None, :]).flatten()
 
-        return np.concatenate(all_rows), np.concatenate(all_cols)
+        # Valid bounds check
+        valid = (rr >= 0) & (rr < self.map_shape[0]) & (cc >= 0) & (cc < self.map_shape[1])
+        return rr[valid], cc[valid]
     #Note: If you have correctly completed all previous functions, then you should be able to create a working RRT function
 
     #RRT* specific functions
@@ -291,32 +332,80 @@ class PathPlanner:
     def rrt_planning(self):
         #This function performs RRT on the given map and robot
         #You do not need to demonstrate this function to the TAs, but it is left in for you to check your work
-        for i in range(1000000):
-            #Focused sampling: sample near the node closest to the goal
-            closest_to_goal_id = self.closest_node(self.goal_point, consider_heading=False)
-            near_x, near_y = self.nodes[closest_to_goal_id].point[:2, 0]
-            d = self.search_dist_around_node
-            bounds = np.array([[near_x - d, near_x + d],
-                               [near_y - d, near_y + d]])
-            # Every 20 iterations, sample near the goal itself
-            if i % 20 == 0:
+        points_to_draw = []
+        edges_to_draw = []
+        for i in trange(self.max_nodes):
+            if i % 500 == 0 and i > 0:
+                print(f"RRT* iter {i}: nodes={len(self.nodes)}. Closest node to goal is {self.closest_to_goal_id} at distance {self.min_goal_dist:.2f}m")
+                # Optimization: Batch draw all buffered points at once
+                for p in points_to_draw:
+                    self.window.add_point(p, radius=2)
+                for (p1, p2) in edges_to_draw:
+                    self.window.add_line(p1, p2)
+                
+                points_to_draw = []
+                edges_to_draw = []
+                
+            # check if all nodes within radius of goal can make direct connection with it without collision. If so, connect and end early.
+            if self.closest_to_goal_id is not None:
+                active_coords = self.node_coords[:self.num_nodes]
+                dists_to_goal = np.linalg.norm(active_coords[:, :2] - self.goal_point.flatten(), axis=1)
+                candidate_ids = np.where(dists_to_goal < self.search_dist_around_node)[0]
+                for candidate_id in candidate_ids:
+                    traj_to_goal = self.connect_node_to_point(self.nodes[candidate_id].point, self.goal_point)
+                    rows, cols = self.points_to_robot_circle(traj_to_goal[:2, :])
+                    if len(rows) > 0 and np.all(self.occupancy_map[rows, cols] > 0.5):
+                        goal_state = traj_to_goal[:, -1].reshape(3, 1)
+                        goal_node = Node(goal_state, candidate_id, 0)
+                        
+                        self.nodes[candidate_id].children_ids.append(len(self.nodes))
+                        self.nodes.append(goal_node)
+                        
+                        # Draw final connection to goal
+                        self.window.add_line(self.nodes[candidate_id].point[:2].flatten(), goal_state[:2].flatten())
+                        
+                        print(f"RRT*: Goal connected directly from node {candidate_id} at iteration {i} with {len(self.nodes)} nodes!")
+                        for p in points_to_draw:
+                            self.window.add_point(p, radius=2)
+                        for (p1, p2) in edges_to_draw:
+                            self.window.add_line(p1, p2)
+                        return self.nodes
+            
+            rand_val = np.random.random()
+            if rand_val < 0.30:
+                # Global sampling: anywhere in map
+                point = self.sample_map_space(bounds=None)
+            elif rand_val < 0.45:
+                # Goal sampling: strict focus on goal
+                goal_radius = 1.5
                 gx, gy = self.goal_point.flatten()
-                bounds = np.array([[gx - 0.5, gx + 0.5],
-                                   [gy - 0.5, gy + 0.5]])
-            point = self.sample_map_space(bounds=bounds)
+                bounds = np.array([[gx - goal_radius, gx + goal_radius],
+                                   [gy - goal_radius, gy + goal_radius]])
+                point = self.sample_map_space(bounds=bounds)
+            else:
+                # Local sampling: around current best node
+                near_x, near_y = self.nodes[self.closest_to_goal_id].point[:2, 0]
+                d = self.search_dist_around_node
+                bounds = np.array([[near_x - d, near_x + d],
+                                   [near_y - d, near_y + d]])
+                point = self.sample_map_space(bounds=bounds)
 
-            #Get the closest node
+            #Closest Node
             closest_node_id = self.closest_node(point)
 
-            #Simulate driving the robot towards the closest point
+            #Simulate trajectory
             trajectory_o = self.simulate_trajectory(self.nodes[closest_node_id].point, point)
 
             #Get new node from trajectory endpoint
             new_point = trajectory_o[:, -1:].copy()
 
-            #Check if duplicate
-            if self.check_if_duplicate(new_point):
+            #Check if duplicate (Optimized)
+            if self.check_if_duplicate(new_point, closest_node_id):
                 continue
+            
+            #Check for Density (Prevent Local Minima Sampling)
+            if self.check_density(new_point):
+                continue # Skip if area is already dense
 
             #Check for collisions along trajectory
             rows, cols = self.points_to_robot_circle(trajectory_o[:2, :])
@@ -327,12 +416,21 @@ class PathPlanner:
             new_node = Node(new_point, closest_node_id, 0)
             self.nodes[closest_node_id].children_ids.append(len(self.nodes))
             self.nodes.append(new_node)
-
-            #Visualize
-            self.window.add_point(new_point[:2].flatten(), radius=2)
-
-            if i % 500 == 0 and i > 0:
-                print("RRT iteration %d, nodes: %d" % (i, len(self.nodes)))
+            
+            self.node_coords[self.num_nodes] = new_point.flatten()
+            self.num_nodes += 1
+            
+            # Optimization: Buffer new points to draw later
+            points_to_draw.append(new_point[:2].flatten())
+            # Buffer the edge to the parent
+            parent_point = self.nodes[closest_node_id].point[:2].flatten()
+            edges_to_draw.append((parent_point, new_point[:2].flatten()))
+            
+            # Optimization: Update tracked closest-to-goal node
+            dist_to_goal_now = np.linalg.norm(new_point[:2] - self.goal_point)
+            if dist_to_goal_now < self.min_goal_dist:
+                self.min_goal_dist = dist_to_goal_now
+                self.closest_to_goal_id = len(self.nodes) - 1
 
             #Check if goal has been reached
             dist_to_goal = np.linalg.norm(new_point[:2] - self.goal_point)
@@ -344,19 +442,63 @@ class PathPlanner:
     
     def rrt_star_planning(self):
         #This function performs RRT* for the given map and robot
-        for i in range(1000000):
-            #Focused sampling: sample near the node closest to the goal
-            closest_to_goal_id = self.closest_node(self.goal_point, consider_heading=False)
-            near_x, near_y = self.nodes[closest_to_goal_id].point[:2, 0]
-            d = self.search_dist_around_node
-            bounds = np.array([[near_x - d, near_x + d],
-                               [near_y - d, near_y + d]])
-            # Every 20 iterations, sample near the goal itself
-            if i % 20 == 0:
+        points_to_draw = []
+        edges_to_draw = []
+        for i in trange(self.max_nodes):
+            if i % 500 == 0 and i > 0:
+                print(f"RRT* iter {i}: nodes={len(self.nodes)}. Closest node to goal is {self.closest_to_goal_id} at distance {self.min_goal_dist:.2f}m")
+                # Optimization: Batch draw all buffered points at once
+                for p in points_to_draw:
+                    self.window.add_point(p, radius=2)
+                for (p1, p2) in edges_to_draw:
+                    self.window.add_line(p1, p2)
+                
+                points_to_draw = []
+                edges_to_draw = []
+            
+            # check if all nodes within radius of goal can make direct connection with it without collision. If so, connect and end early.
+            if self.closest_to_goal_id is not None:
+                active_coords = self.node_coords[:self.num_nodes]
+                dists_to_goal = np.linalg.norm(active_coords[:, :2] - self.goal_point.flatten(), axis=1)
+                candidate_ids = np.where(dists_to_goal < self.search_dist_around_node)[0]
+                for candidate_id in candidate_ids:
+                    traj_to_goal = self.connect_node_to_point(self.nodes[candidate_id].point, self.goal_point)
+                    rows, cols = self.points_to_robot_circle(traj_to_goal[:2, :])
+                    if len(rows) > 0 and np.all(self.occupancy_map[rows, cols] > 0.5):
+                        goal_state = traj_to_goal[:, -1].reshape(3, 1)
+                        goal_node = Node(goal_state, candidate_id, 0)
+                        
+                        self.nodes[candidate_id].children_ids.append(len(self.nodes))
+                        self.nodes.append(goal_node)
+                        
+                        # Draw final connection to goal
+                        self.window.add_line(self.nodes[candidate_id].point[:2].flatten(), goal_state[:2].flatten())
+                        
+                        print(f"RRT*: Goal connected directly from node {candidate_id} at iteration {i} with {len(self.nodes)} nodes!")
+                        for p in points_to_draw:
+                            self.window.add_point(p, radius=2)
+                        for (p1, p2) in edges_to_draw:
+                            self.window.add_line(p1, p2)
+                        return self.nodes
+            
+            rand_val = np.random.random()
+            if rand_val < 0.30:
+                # Global sampling: anywhere in map
+                point = self.sample_map_space(bounds=None)
+            elif rand_val < 0.45:
+                # Goal sampling: strict focus on goal
+                goal_radius = 1.5
                 gx, gy = self.goal_point.flatten()
-                bounds = np.array([[gx - 0.5, gx + 0.5],
-                                   [gy - 0.5, gy + 0.5]])
-            point = self.sample_map_space(bounds=bounds)
+                bounds = np.array([[gx - goal_radius, gx + goal_radius],
+                                   [gy - goal_radius, gy + goal_radius]])
+                point = self.sample_map_space(bounds=bounds)
+            else:
+                # Local sampling: around current best node
+                near_x, near_y = self.nodes[self.closest_to_goal_id].point[:2, 0]
+                d = self.search_dist_around_node
+                bounds = np.array([[near_x - d, near_x + d],
+                                   [near_y - d, near_y + d]])
+                point = self.sample_map_space(bounds=bounds)
 
             #Closest Node
             closest_node_id = self.closest_node(point)
@@ -367,9 +509,13 @@ class PathPlanner:
             #Get new node from trajectory endpoint
             new_point = trajectory_o[:, -1:].copy()
 
-            #Check if duplicate
-            if self.check_if_duplicate(new_point):
+            #Check if duplicate (Optimized)
+            if self.check_if_duplicate(new_point, closest_node_id):
                 continue
+            
+            #Check for Density (Prevent Local Minima Sampling)
+            if self.check_density(new_point):
+                    continue 
 
             #Check for collisions along trajectory
             rows, cols = self.points_to_robot_circle(trajectory_o[:2, :])
@@ -378,8 +524,10 @@ class PathPlanner:
 
             #Find all nodes within ball radius for rewiring
             ball_rad = self.ball_radius()
-            all_points = np.hstack([n.point[:2] for n in self.nodes])
-            dists = np.linalg.norm(all_points - new_point[:2], axis=0)
+            
+            # Use pre-allocated numpy array instead of list comprehension
+            active_coords = self.node_coords[:self.num_nodes]
+            dists = np.linalg.norm(active_coords[:, :2] - new_point[:2].flatten(), axis=1)
             near_node_ids = np.where(dists < ball_rad)[0].tolist()
 
             #Best parent selection
@@ -401,6 +549,21 @@ class PathPlanner:
             new_node_id = len(self.nodes)
             self.nodes[best_parent_id].children_ids.append(new_node_id)
             self.nodes.append(new_node)
+            
+            self.node_coords[self.num_nodes] = new_point.flatten()
+            self.num_nodes += 1
+            
+            # Optimization: Buffer new points to draw later
+            points_to_draw.append(new_point[:2].flatten())
+            # Buffer the edge to the parent
+            parent_point = self.nodes[best_parent_id].point[:2].flatten()
+            edges_to_draw.append((parent_point, new_point[:2].flatten()))
+            
+            # Optimization: Update tracked closest-to-goal node
+            dist_to_goal_now = np.linalg.norm(new_point[:2] - self.goal_point)
+            if dist_to_goal_now < self.min_goal_dist:
+                self.min_goal_dist = dist_to_goal_now
+                self.closest_to_goal_id = new_node_id
 
             #Rewire nearby nodes through new node
             for near_id in near_node_ids:
@@ -421,16 +584,11 @@ class PathPlanner:
                     self.nodes[near_id].cost = new_cost
                     new_node.children_ids.append(near_id)
                     self.update_children(near_id)
-
-            #Visualize
-            self.window.add_point(new_point[:2].flatten(), radius=2)
-
-            if i % 500 == 0 and i > 0:
-                print(f"RRT* iter {i}: nodes={len(self.nodes)}")
+                    # Draw new rewired edge
+                    edges_to_draw.append((new_point[:2].flatten(), self.nodes[near_id].point[:2].flatten()))
 
             #Check for early end
-            dist_to_goal = np.linalg.norm(new_point[:2] - self.goal_point)
-            if dist_to_goal < self.stopping_dist:
+            if dist_to_goal_now < self.stopping_dist:
                 print(f"RRT*: Goal reached at iteration {i} with {len(self.nodes)} nodes!")
                 break
 
@@ -443,7 +601,28 @@ class PathPlanner:
             path.append(self.nodes[current_node_id].point)
             current_node_id = self.nodes[current_node_id].parent_id
         path.reverse()
-        return path
+
+        # Build adjusted path where the heading at each waypoint is the
+        # midpoint between the incoming and outgoing directions.
+        adjusted = []
+        for i in range(len(path)):
+            x, y = path[i][:2, 0]
+            if i == 0:
+                # First waypoint: heading toward the next
+                h = heading(path[0][:2, 0], path[1][:2, 0])
+            elif i == len(path) - 1:
+                # Last waypoint: heading from the previous
+                h = heading(path[-2][:2, 0], path[-1][:2, 0])
+            else:
+                # Midpoint heading between incoming and outgoing directions
+                h_prev = heading(path[i-1][:2, 0], path[i][:2, 0])
+                h_next = heading(path[i][:2, 0], path[i+1][:2, 0])
+                # Average on the unit circle to avoid wrap issues
+                h = np.arctan2(np.sin(h_prev) + np.sin(h_next), np.cos(h_prev) + np.cos(h_next))
+
+            adjusted.append(np.array([[x], [y], [h]]))
+
+        return adjusted
 
 def main():
     #Set map information
@@ -458,10 +637,27 @@ def main():
     path_planner = PathPlanner(map_filename, map_setings_filename, goal_point, stopping_dist)
     nodes = path_planner.rrt_star_planning()
     node_path_metric = np.hstack(path_planner.recover_path())
-
+    
     #Save path for trajectory rollout
     np.save("path.npy", node_path_metric)
     print(f"Path saved with {node_path_metric.shape[1]} waypoints")
+    
+    # Visualizing the Final Path in Green
+    print("Visualizing final path...")
+    for i in range(node_path_metric.shape[1] - 1):
+        p1 = node_path_metric[:2, i].flatten()
+        p2 = node_path_metric[:2, i + 1].flatten()
+        # Draw green line (0, 255, 0)
+        path_planner.window.add_line(p1, p2, width=3, color=(0, 255, 0))
+    
+    # Keep window open for a bit
+    print("Done! Close the window to exit.")
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+        time.sleep(0.1)
 
 
 if __name__ == '__main__':
