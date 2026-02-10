@@ -626,11 +626,11 @@ class PathPlanner:
 
 def main():
     #Set map information
-    map_filename = "willowgarageworld_05res.png"
-    map_setings_filename = "willowgarageworld_05res.yaml"
+    map_filename = "myhal.png"
+    map_setings_filename = "myhal.yaml"
 
     #robot information
-    goal_point = np.array([[42.05], [-44]]) #m
+    goal_point = np.array([[7], [0]]) #m
     stopping_dist = 0.5 #m
 
     #RRT* planning
