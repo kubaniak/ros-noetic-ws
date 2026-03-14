@@ -92,8 +92,26 @@ class OccupancyGripMap:
         odom_map[1] = odom_map_tf.translation.y
         odom_map[2] = euler_from_ros_quat(odom_map_tf.rotation)[2]
 
-        # YOUR CODE HERE!!! Loop through each measurement in scan_msg to get the correct angle and
-        # x_start and y_start to send to your ray_trace_update function.
+        # Robot position in map pixel coordinates
+        x_start = int(odom_map[0] / CELL_SIZE)
+        y_start = int(odom_map[1] / CELL_SIZE)
+
+        # Loop through each LiDAR beam (with downsampling)
+        for i in range(0, len(scan_msg.ranges), SCAN_DOWNSAMPLE):
+            range_mes = scan_msg.ranges[i]
+            # Skip invalid readings
+            if range_mes == 0.0 or np.isnan(range_mes):
+                continue
+            # Cap at max range so inf rays still mark free space up to range_max
+            if np.isinf(range_mes):
+                range_mes = scan_msg.range_max
+
+            # Beam angle in map frame: beam index angle + robot heading in map
+            angle = scan_msg.angle_min + i * scan_msg.angle_increment + odom_map[2]
+
+            self.np_map, self.log_odds = self.ray_trace_update(
+                self.np_map, self.log_odds, x_start, y_start, angle, range_mes
+            )
 
         # publish the message
         self.map_msg.info.map_load_time = rospy.Time.now()
@@ -112,9 +130,34 @@ class OccupancyGripMap:
         :param range_mes: The range of the measurement along the ray.
         :return: The numpy map and the log odds updated along a single ray.
         """
-        # YOUR CODE HERE!!! You should modify the log_odds object and the numpy map based on the outputs from
-        # ray_trace and the equations from class. Your numpy map must be an array of int8s with 0 to 100 representing
-        # probability of occupancy, and -1 representing unknown.
+        # Compute endpoint pixel of the ray
+        x_end = int(x_start + (range_mes / CELL_SIZE) * np.cos(angle))
+        y_end = int(y_start + (range_mes / CELL_SIZE) * np.sin(angle))
+
+        # Get all pixel indices along the ray (skimage line)
+        rr, cc = ray_trace(x_start, y_start, x_end, y_end)
+
+        # Clip to map bounds
+        in_bounds = (rr >= 0) & (rr < map.shape[0]) & (cc >= 0) & (cc < map.shape[1])
+        rr = rr[in_bounds]
+        cc = cc[in_bounds]
+
+        if len(rr) == 0:
+            return map, log_odds
+
+        # All pixels except the last NUM_PTS_OBSTACLE are free
+        free_rr = rr[:-NUM_PTS_OBSTACLE] if len(rr) > NUM_PTS_OBSTACLE else rr
+        free_cc = cc[:-NUM_PTS_OBSTACLE] if len(cc) > NUM_PTS_OBSTACLE else cc
+        log_odds[free_rr, free_cc] -= BETA
+
+        # Last NUM_PTS_OBSTACLE pixels are occupied (only if ray hit something, not at max range)
+        if not np.isinf(scan_msg.range_max) and range_mes < scan_msg.range_max:
+            occ_rr = rr[-NUM_PTS_OBSTACLE:]
+            occ_cc = cc[-NUM_PTS_OBSTACLE:]
+            log_odds[occ_rr, occ_cc] += ALPHA
+
+        # Convert log odds to probability, scale to 0-100 int8
+        map[rr, cc] = (self.log_odds_to_probability(log_odds[rr, cc]) * 100).astype(np.int8)
 
         return map, log_odds
 
