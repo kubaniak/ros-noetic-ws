@@ -11,23 +11,6 @@ You can use this repository to start developing your ROS modules. It provides a 
 
 This is a repository template, ready for you to either *fork* it (being able to pull in changes that happen in this repository later, recommended) or *use this template* to create your own independent repository.
 
-### Option 1: How to *fork* (recommended)
-
-Go to https://github.com/LCAS/CMP9764 and click on 
-
-![Fork](.assets/fork.png) 
-
-to create a GitHub Fork in your own GitHub account. Then continue to [clone](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) this repository on your computer. Learn more about GitHub Forks [here](https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/fork-a-repo).
-
-### Option 2: How to *use as template*
-
-Go to https://github.com/LCAS/CMP9764 and click on 
-
-![usetemplate](.assets/usetemplate.png)
-
-to create a new repository in your own GitHub account. Then continue to [clone](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) this repository on your computer. *Note: This repository is detached from the original one, so any changes in https://github.com/LCAS/CMP9764 happening after you created your own repository will have to be manually added.
-
-
 ### Setup your working environment
 
 1. Make sure you have VSCode installed: https://code.visualstudio.com/download
