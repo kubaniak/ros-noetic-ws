@@ -81,13 +81,48 @@ class WheelOdom:
             # Update your odom estimates with the latest encoder measurements and populate the relevant area
             # of self.pose and self.twist with estimated position, heading and velocity
 
-            # self.pose.position.x = xx
-            # self.pose.position.y = xx
-            # self.pose.orientation = xx
+            # handle overflow
+            INT32_MAX = 2**31
+            def safe_del_phi(a, b):
+                diff = np.int64(b) - np.int64(a)
+                if diff < -np.int64(INT32_MAX):
+                    return (INT32_MAX - 1 - a) + (INT32_MAX + b) + 1
+                elif diff > np.int64(INT32_MAX) - 1:
+                    return -((INT32_MAX + a) + (INT32_MAX - 1 - b) + 1)
+                else:
+                    return b - a
 
-            # self.twist.linear.x = mu_dot[0].item()
-            # self.twist.linear.y = mu_dot[1].item()
-            # self.twist.angular.z = mu_dot[2].item()
+            del_time = (sensor_state_msg.header.stamp - self.last_time).to_sec()
+
+            del_ticks_l = safe_del_phi(self.last_enc_l, le)
+            del_ticks_r = safe_del_phi(self.last_enc_r, re)
+
+            d_l = del_ticks_l * RAD_PER_TICK * WHEEL_RADIUS
+            d_r = del_ticks_r * RAD_PER_TICK * WHEEL_RADIUS
+
+            d_c = (d_l + d_r) / 2.0
+            d_theta = (d_r - d_l) / (2.0 * BASELINE)
+
+            current_euler = euler_from_ros_quat(self.pose.orientation)
+            theta = current_euler[2]
+            theta_new = theta + d_theta
+
+            self.pose.position.x += d_c * np.cos(theta + d_theta / 2.0)
+            self.pose.position.y += d_c * np.sin(theta + d_theta / 2.0)
+            self.pose.orientation = ros_quat_from_euler((0.0, 0.0, theta_new))
+
+            if del_time > 0:
+                self.twist.linear.x = d_c / del_time
+                self.twist.linear.y = 0.0
+                self.twist.angular.z = d_theta / del_time
+            else:
+                self.twist.linear.x = 0.0
+                self.twist.linear.y = 0.0
+                self.twist.angular.z = 0.0
+
+            self.last_enc_l = le
+            self.last_enc_r = re
+            self.last_time = sensor_state_msg.header.stamp
 
             # publish the updates as a topic and in the tf tree
             current_time = rospy.Time.now()
