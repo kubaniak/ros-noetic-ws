@@ -111,10 +111,6 @@ class OccupancyGripMap:
             angle_in_scan = scan_msg.angle_min + i * scan_msg.angle_increment
 
             # Find the pose of the laser frame in the odom frame
-            # The prompt says: "odom_map[2] is the orientation"
-            # Since base_link_scan_tf provides the transform from base_link to base_scan
-            # But the angle just needs to be rotated by the robot's heading + scan's heading relative to robot
-
             # The orientation of the sensor in base_link
             scan_euler = euler_from_ros_quat(self.base_link_scan_tf.transform.rotation)
 
