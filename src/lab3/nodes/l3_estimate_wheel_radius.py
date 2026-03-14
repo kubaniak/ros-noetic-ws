@@ -72,12 +72,16 @@ class wheelRadiusEstimator():
 
         elif self.isMoving is True and np.isclose(input_velocity_mag, 0):
             self.isMoving = False #Set the state to stopped
-
-            # # YOUR CODE HERE!!!
+            
+            # Calculate the average absolute ticks (absolute in case the robot reversed)
+            avg_ticks = (abs(self.del_left_encoder) + abs(self.del_right_encoder)) / 2.0
+            
             # Calculate the radius of the wheel based on encoder measurements
-
-            # radius = ##
-            # print('Calibrated Radius: {} m'.format(radius))
+            if avg_ticks > 0:
+                radius = (DRIVEN_DISTANCE * TICKS_PER_ROTATION) / (avg_ticks * 2 * np.pi)
+                print('Calibrated Radius: {:.5f} m'.format(radius))
+            else:
+                print('Error: No encoder ticks recorded. Cannot calculate radius.')
 
             #Reset the robot and calibration routine
             self.lock.acquire()
