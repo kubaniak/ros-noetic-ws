@@ -73,21 +73,33 @@ class WheelOdom:
             self.last_enc_r = sensor_state_msg.right_encoder
             self.last_time = sensor_state_msg.header.stamp
         else:
-            # update calculated pose and twist with new data
-            le = sensor_state_msg.left_encoder
-            re = sensor_state_msg.right_encoder
+            # Get dt
+            current_time = sensor_state_msg.header.stamp
+            dt = (current_time - self.last_time).to_sec()
 
-            # # YOUR CODE HERE!!!
-            # Update your odom estimates with the latest encoder measurements and populate the relevant area
-            # of self.pose and self.twist with estimated position, heading and velocity
+            d_ticks_l = sensor_state_msg.left_encoder - self.last_enc_l
+            d_ticks_r = sensor_state_msg.right_encoder - self.last_enc_r
 
-            # self.pose.position.x = xx
-            # self.pose.position.y = xx
-            # self.pose.orientation = xx
+            d_l = d_ticks_l * RAD_PER_TICK * WHEEL_RADIUS
+            d_r = d_ticks_r * RAD_PER_TICK * WHEEL_RADIUS
 
-            # self.twist.linear.x = mu_dot[0].item()
-            # self.twist.linear.y = mu_dot[1].item()
-            # self.twist.angular.z = mu_dot[2].item()
+            d_center = (d_r + d_l) / 2.0
+            prev_theta = euler_from_ros_quat(self.pose.orientation)[2]
+            d_theta = (d_r - d_l) / (BASELINE * 2.0) # Small angle approx since these updates should be fast
+
+            integ_theta = prev_theta + d_theta / 2.0 # Take the middle of d_theta (midpoint so better I think)
+            self.pose.position.x = self.pose.position.x + np.cos(integ_theta) * d_center
+            self.pose.position.y = self.pose.position.y + np.cos(integ_theta) * d_center
+            self.pose.orientation = ros_quat_from_euler(0, 0, prev_theta + d_theta)
+
+            self.twist.linear.x = d_center / dt
+            self.twist.linear.y = 0.0
+            self.twist.angular.z = d_theta / dt
+
+
+            self.last_enc_l = sensor_state_msg.left_encoder
+            self.last_enc_r = sensor_state_msg.right_encoder
+            self.last_time = current_time
 
             # publish the updates as a topic and in the tf tree
             current_time = rospy.Time.now()
