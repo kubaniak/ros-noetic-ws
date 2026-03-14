@@ -74,11 +74,16 @@ class wheelBaselineEstimator():
         elif self.isMoving is True and np.isclose(msg.angular.z, 0):
             self.isMoving = False #Set the state to stopped
 
-            # # YOUR CODE HERE!!!
-            # Calculate the radius of the wheel based on encoder measurements
+            avg_ticks = (abs(self.del_left_encoder) + abs(self.del_right_encoder)) / 2.0
 
-            # separation = ##
-            # print('Calibrated Separation: {} m'.format(separation))
+            if avg_ticks > 0:
+                wheel_distance = (avg_ticks / TICKS_PER_ROTATION) * (2 * np.pi * WHEEL_RADIUS)
+                total_angle = 2 * np.pi * NUM_ROTATIONS
+                separation = (2 * wheel_distance) / total_angle
+                
+                print('Calibrated Separation: {:.5f} m'.format(separation))
+            else:
+                print('Error: No encoder ticks recorded. Cannot calculate separation.')
 
             #Reset the robot and calibration routine
             self.lock.acquire()
