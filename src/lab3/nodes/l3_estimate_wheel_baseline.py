@@ -74,11 +74,17 @@ class wheelBaselineEstimator():
         elif self.isMoving is True and np.isclose(msg.angular.z, 0):
             self.isMoving = False #Set the state to stopped
 
-            # # YOUR CODE HERE!!!
-            # Calculate the radius of the wheel based on encoder measurements
+            # YOUR CODE HERE!!!
+            # Calculate the separation of the wheels based on encoder measurements
+            # Rotations = ((del_right_encoder - del_left_encoder) / TICKS_PER_ROTATION * WHEEL_RADIUS) / separation
+            # separation = ((del_right_encoder - del_left_encoder) / TICKS_PER_ROTATION * WHEEL_RADIUS) / NUM_ROTATIONS
 
-            # separation = ##
-            # print('Calibrated Separation: {} m'.format(separation))
+            # TODO: Plug in the WHEEL_RADIUS from l3_estimate_wheel_radius.py
+            rotations = (self.del_right_encoder - self.del_left_encoder) / TICKS_PER_ROTATION
+            dist = rotations * WHEEL_RADIUS
+            separation = dist / NUM_ROTATIONS
+
+            print('Calibrated Separation: {} m'.format(separation))
 
             #Reset the robot and calibration routine
             self.lock.acquire()
