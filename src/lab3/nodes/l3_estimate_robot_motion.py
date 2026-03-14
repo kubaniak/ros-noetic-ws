@@ -89,8 +89,8 @@ class WheelOdom:
 
             integ_theta = prev_theta + d_theta / 2.0 # Take the middle of d_theta (midpoint so better I think)
             self.pose.position.x = self.pose.position.x + np.cos(integ_theta) * d_center
-            self.pose.position.y = self.pose.position.y + np.cos(integ_theta) * d_center
-            self.pose.orientation = ros_quat_from_euler(0, 0, prev_theta + d_theta)
+            self.pose.position.y = self.pose.position.y + np.sin(integ_theta) * d_center
+            self.pose.orientation = ros_quat_from_euler([0.0, 0.0, prev_theta + d_theta])
 
             self.twist.linear.x = d_center / dt
             self.twist.linear.y = 0.0
