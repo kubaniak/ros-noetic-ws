@@ -53,4 +53,4 @@ The occupancy grid mapping algorithm is based on log-odds belief updating using 
 
 ### TODO DURING REPORT WRITING ###
 - Describe how your code works or should work. (1 pt)
-- Explain a potential source of error in this mapping algorithm. (0.5 pt) (for mapping the gazebo world)
+- Explain a potential source of error in this mapping algorithm. (0.5 pt) (for mapping the gazebo world) 
