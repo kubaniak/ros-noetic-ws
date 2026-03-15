@@ -10,7 +10,7 @@ from geometry_msgs.msg import Twist
 INT32_MAX = 2**31
 NUM_ROTATIONS = 3 
 TICKS_PER_ROTATION = 4096
-WHEEL_RADIUS = 0.066 / 2 #In meters
+WHEEL_RADIUS = 0.03253555602291784 #From terminal output of wheel radius calibration node (in meters)
 
 
 class wheelBaselineEstimator():
@@ -79,23 +79,11 @@ class wheelBaselineEstimator():
             # Rotations = ((del_right_encoder - del_left_encoder) / TICKS_PER_ROTATION * WHEEL_RADIUS) / separation
             # separation = ((del_right_encoder - del_left_encoder) / TICKS_PER_ROTATION * WHEEL_RADIUS) / NUM_ROTATIONS
 
-            # TODO: Plug in the WHEEL_RADIUS from l3_estimate_wheel_radius.py
-            rotations = (self.del_right_encoder - self.del_left_encoder) / TICKS_PER_ROTATION
+            rotations = abs(self.del_right_encoder - self.del_left_encoder) / TICKS_PER_ROTATION
             dist = rotations * WHEEL_RADIUS
             separation = dist / NUM_ROTATIONS
 
             print('Calibrated Separation: {} m'.format(separation))
-
-            #Reset the robot and calibration routine
-            self.lock.acquire()
-            self.left_encoder_prev = None
-            self.right_encoder_prev = None
-            self.del_left_encoder = 0
-            self.del_right_encoder = 0
-            self.lock.release()
-            reset_msg = Empty()
-            self.reset_pub.publish(reset_msg)
-            print('Resetted the robot to calibrate again!')
 
         return
 

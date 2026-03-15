@@ -8,7 +8,7 @@ from std_msgs.msg import Empty
 from geometry_msgs.msg import Twist
 
 INT32_MAX = 2**31
-DRIVEN_DISTANCE = 0.75 #in meters
+DRIVEN_DISTANCE = 1.2192 #in meters (4 ft as per lab manual)
 TICKS_PER_ROTATION = 4096
 
 class wheelRadiusEstimator():
@@ -78,22 +78,11 @@ class wheelRadiusEstimator():
             # Distance driven = (average encoder ticks / ticks per rotation) * 2 * pi * radius
             # radius = Distance driven / ((average encoder ticks / ticks per rotation) * 2 * pi)
 
-            avg_encoder_ticks = (self.del_left_encoder + self.del_right_encoder) / 2.0
+            avg_encoder_ticks = abs(self.del_left_encoder + self.del_right_encoder) / 2.0
             rotations = avg_encoder_ticks / TICKS_PER_ROTATION
             radius = DRIVEN_DISTANCE / (rotations * 2 * np.pi)
 
             print('Calibrated Radius: {} m'.format(radius))
-
-            #Reset the robot and calibration routine
-            self.lock.acquire()
-            self.left_encoder_prev = None
-            self.right_encoder_prev = None
-            self.del_left_encoder = 0
-            self.del_right_encoder = 0
-            self.lock.release()
-            reset_msg = Empty()
-            self.reset_pub.publish(reset_msg)
-            print('Resetted the robot to calibrate again!')
 
         return
 

@@ -17,12 +17,15 @@ from utils import convert_pose_to_tf, convert_tf_to_pose, euler_from_ros_quat, \
      tf_to_tf_mat, tf_mat_to_tf
 
 
-ALPHA = 1
+ALPHA = 0.2
 BETA = 1
-MAP_DIM = (4, 4)
+MAP_DIM = (8, 8)
 CELL_SIZE = .01
 NUM_PTS_OBSTACLE = 3
-SCAN_DOWNSAMPLE = 1
+SCAN_DOWNSAMPLE = 3
+CLAMP_LOG_ODDS = True
+CLAMP_MIN = -10
+CLAMP_MAX = 10
 
 class OccupancyGripMap:
     def __init__(self):
@@ -102,8 +105,8 @@ class OccupancyGripMap:
 
         # Odom is the robot's current pose in the map frame
         # We need to find the pixel coordinate of the robot
-        x_start = int(odom_map[0] / CELL_SIZE + width / 2.0)
-        y_start = int(odom_map[1] / CELL_SIZE + height / 2.0)
+        x_start = int(odom_map[0] / CELL_SIZE)
+        y_start = int(odom_map[1] / CELL_SIZE)
 
         # Base angle of the robot
         robot_angle = odom_map[2]
@@ -126,7 +129,7 @@ class OccupancyGripMap:
 
         # publish the message
         self.map_msg.info.map_load_time = rospy.Time.now()
-        self.map_msg.data = self.np_map.flatten()
+        self.map_msg.data = self.np_map.T.flatten()
         self.map_pub.publish(self.map_msg)
 
     def ray_trace_update(self, map, log_odds, x_start, y_start, angle, range_mes):
@@ -168,8 +171,9 @@ class OccupancyGripMap:
             rr_free = rr[:-NUM_PTS_OBSTACLE]
             cc_free = cc[:-NUM_PTS_OBSTACLE]
             log_odds[cc_free, rr_free] -= BETA
+            if CLAMP_LOG_ODDS:
+                np.clip(log_odds[cc_free, rr_free], CLAMP_MIN, CLAMP_MAX, out=log_odds[cc_free, rr_free])
 
-            # Ensure probabilities are calculated and map is updated for free space
             probs_free = self.log_odds_to_probability(log_odds[cc_free, rr_free])
             map[cc_free, rr_free] = (probs_free * 100).astype(np.int8)
 
@@ -178,8 +182,9 @@ class OccupancyGripMap:
             rr_obs = rr[-NUM_PTS_OBSTACLE:]
             cc_obs = cc[-NUM_PTS_OBSTACLE:]
             log_odds[cc_obs, rr_obs] += ALPHA
+            if CLAMP_LOG_ODDS:
+                np.clip(log_odds[cc_obs, rr_obs], CLAMP_MIN, CLAMP_MAX, out=log_odds[cc_obs, rr_obs])
 
-            # Update map for obstacles
             probs_obs = self.log_odds_to_probability(log_odds[cc_obs, rr_obs])
             map[cc_obs, rr_obs] = (probs_obs * 100).astype(np.int8)
 

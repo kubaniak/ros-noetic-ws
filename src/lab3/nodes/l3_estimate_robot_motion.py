@@ -20,9 +20,8 @@ from utils import convert_pose_to_tf, euler_from_ros_quat, ros_quat_from_euler
 
 ENC_TICKS = 4096
 RAD_PER_TICK = 0.001533981
-BASELINE_FULL = 2.0 * BASELINE  # full wheel separation (meters)
-WHEEL_RADIUS = .066 / 2
-BASELINE = .287 / 2
+WHEEL_RADIUS = 0.03253555602291784
+BASELINE = 0.2910671934895311
 
 
 class WheelOdom:
@@ -116,7 +115,7 @@ class WheelOdom:
 
             # Compute change in heading and distance
             d = (d_r + d_l) / 2.0
-            th = (d_r - d_l) / BASELINE_FULL
+            th = (d_r - d_l) / BASELINE
 
             # Integrate position (Euler integration)
             current_euler = euler_from_ros_quat(self.pose.orientation)

@@ -49,3 +49,8 @@ The occupancy grid mapping algorithm is based on log-odds belief updating using 
    - Run `rosrun rob521_lab3 l3_mapping.py`.
    - Teleoperate the robot to map the maze in Myhal 570.
    - Save the `map.png` to include in the final deliverable.
+
+
+### TODO DURING REPORT WRITING ###
+- Describe how your code works or should work. (1 pt)
+- Explain a potential source of error in this mapping algorithm. (0.5 pt) (for mapping the gazebo world)
