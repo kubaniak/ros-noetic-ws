@@ -73,9 +73,9 @@ class WheelOdom:
             self.last_enc_r = sensor_state_msg.right_encoder
             self.last_time = sensor_state_msg.header.stamp
         else:
-            # update calculated pose and twist with new data
-            le = sensor_state_msg.left_encoder
-            re = sensor_state_msg.right_encoder
+            # Get dt
+            current_time = sensor_state_msg.header.stamp
+            dt = (current_time - self.last_time).to_sec()
 
             # YOUR CODE HERE!!!
             # Update your odom estimates with the latest encoder measurements and populate the relevant area
