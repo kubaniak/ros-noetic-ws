@@ -20,8 +20,8 @@ from utils import convert_pose_to_tf, euler_from_ros_quat, ros_quat_from_euler
 
 ENC_TICKS = 4096
 RAD_PER_TICK = 0.001533981
-WHEEL_RADIUS = .066 / 2
-BASELINE = .287 / 2
+WHEEL_RADIUS = 0.03253555602291784
+BASELINE = 0.2910671934895311
 
 
 class WheelOdom:
@@ -77,29 +77,64 @@ class WheelOdom:
             current_time = sensor_state_msg.header.stamp
             dt = (current_time - self.last_time).to_sec()
 
-            d_ticks_l = sensor_state_msg.left_encoder - self.last_enc_l
-            d_ticks_r = sensor_state_msg.right_encoder - self.last_enc_r
+            # YOUR CODE HERE!!!
+            # Update your odom estimates with the latest encoder measurements and populate the relevant area
+            # of self.pose and self.twist with estimated position, heading and velocity
 
-            d_l = d_ticks_l * RAD_PER_TICK * WHEEL_RADIUS
-            d_r = d_ticks_r * RAD_PER_TICK * WHEEL_RADIUS
+            # Compute difference in encoder counts
+            del_le = le - self.last_enc_l
+            del_re = re - self.last_enc_r
 
-            d_center = (d_r + d_l) / 2.0
-            prev_theta = euler_from_ros_quat(self.pose.orientation)[2]
-            d_theta = (d_r - d_l) / (BASELINE * 2.0) # Small angle approx since these updates should be fast
+            # Handle overflow/underflow (simplified version of safeDelPhi)
+            INT32_MAX = 2**31
+            def safeDelPhi(a, b):
+                diff = np.int64(b) - np.int64(a)
+                if diff < -np.int64(INT32_MAX):
+                    return (INT32_MAX - 1 - a) + (INT32_MAX + b) + 1
+                elif diff > np.int64(INT32_MAX) - 1:
+                    return (INT32_MAX + a) + (INT32_MAX - 1 - b) + 1
+                return b - a
 
-            integ_theta = prev_theta + d_theta / 2.0 # Take the middle of d_theta (midpoint so better I think)
-            self.pose.position.x = self.pose.position.x + np.cos(integ_theta) * d_center
-            self.pose.position.y = self.pose.position.y + np.sin(integ_theta) * d_center
-            self.pose.orientation = ros_quat_from_euler([0.0, 0.0, prev_theta + d_theta])
+            del_le = safeDelPhi(self.last_enc_l, le)
+            del_re = safeDelPhi(self.last_enc_r, re)
 
-            self.twist.linear.x = d_center / dt
-            self.twist.linear.y = 0.0
-            self.twist.angular.z = d_theta / dt
+            self.last_enc_l = le
+            self.last_enc_r = re
 
-
-            self.last_enc_l = sensor_state_msg.left_encoder
-            self.last_enc_r = sensor_state_msg.right_encoder
+            current_time = sensor_state_msg.header.stamp
+            dt = (current_time - self.last_time).to_sec()
             self.last_time = current_time
+
+            # Convert to radians
+            del_le_rad = del_le * RAD_PER_TICK
+            del_re_rad = del_re * RAD_PER_TICK
+
+            # Compute distances
+            d_l = del_le_rad * WHEEL_RADIUS
+            d_r = del_re_rad * WHEEL_RADIUS
+
+            # Compute change in heading and distance
+            d = (d_r + d_l) / 2.0
+            th = (d_r - d_l) / BASELINE
+
+            # Integrate position (Euler integration)
+            current_euler = euler_from_ros_quat(self.pose.orientation)
+            current_theta = current_euler[2]
+
+            self.pose.position.x += d * np.cos(current_theta)
+            self.pose.position.y += d * np.sin(current_theta)
+
+            new_theta = current_theta + th
+            self.pose.orientation = ros_quat_from_euler([0, 0, new_theta])
+
+            if dt > 0:
+                self.twist.linear.x = d / dt
+                self.twist.linear.y = 0.0
+                self.twist.angular.z = th / dt
+            else:
+                self.twist.linear.x = 0.0
+                self.twist.linear.y = 0.0
+                self.twist.angular.z = 0.0
 
             # publish the updates as a topic and in the tf tree
             current_time = rospy.Time.now()

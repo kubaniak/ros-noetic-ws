@@ -46,6 +46,7 @@ RUN apt-get update && apt-get install -y \
     ros-noetic-dynamixel-sdk \
     ros-noetic-turtlebot3-msgs \
     ros-noetic-turtlebot3 \
+    ros-noetic-turtlebot3-simulations \
     git \
     nano \
     sudo \
@@ -67,6 +68,7 @@ ADD "https://api.github.com/repos/LCAS/cmp9764/commits?per_page=1&sha=main" .lca
 RUN apt-get update && apt-get install -y \
     python3 \
     python3-pip \
+    python3-tk \
     && rm -rf /var/lib/apt/lists/*
 
 RUN cd /usr/local/bin && \
