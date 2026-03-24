@@ -105,6 +105,10 @@ class OccupancyGripMap:
             # Skip invalid readings
             if range_mes == 0.0 or np.isnan(range_mes):
                 continue
+
+            # Track whether this ray hit an obstacle
+            is_obstacle = not np.isinf(range_mes) and range_mes < scan_msg.range_max
+
             # Cap at max range so inf rays still mark free space up to range_max
             if np.isinf(range_mes):
                 range_mes = scan_msg.range_max
@@ -113,44 +117,15 @@ class OccupancyGripMap:
             angle = scan_msg.angle_min + i * scan_msg.angle_increment + odom_map[2]
 
             self.np_map, self.log_odds = self.ray_trace_update(
-                self.np_map, self.log_odds, x_start, y_start, angle, range_mes, scan_msg
+                self.np_map, self.log_odds, x_start, y_start, angle, range_mes, is_obstacle
             )
-
-        # Origin of the map is stored in self.map_msg.info.origin
-        # Map center in meters (relative to origin)
-        width = self.map_msg.info.width
-        height = self.map_msg.info.height
-
-        # Odom is the robot's current pose in the map frame
-        # We need to find the pixel coordinate of the robot
-        x_start = int(odom_map[0] / CELL_SIZE)
-        y_start = int(odom_map[1] / CELL_SIZE)
-
-        # Base angle of the robot
-        robot_angle = odom_map[2]
-
-        for i, range_mes in enumerate(scan_msg.ranges):
-            if i % SCAN_DOWNSAMPLE != 0:
-                continue
-
-            # Skip invalid measurements
-            if np.isnan(range_mes) or np.isinf(range_mes):
-                continue
-            if range_mes < scan_msg.range_min or range_mes > scan_msg.range_max:
-                continue
-
-            # Calculate the angle of the current laser ray
-            ray_angle = scan_msg.angle_min + i * scan_msg.angle_increment
-            global_angle = robot_angle + ray_angle
-
-            self.np_map, self.log_odds = self.ray_trace_update(self.np_map, self.log_odds, x_start, y_start, global_angle, range_mes, scan_msg)
 
         # publish the message
         self.map_msg.info.map_load_time = rospy.Time.now()
         self.map_msg.data = self.np_map.T.flatten()
         self.map_pub.publish(self.map_msg)
 
-    def ray_trace_update(self, map, log_odds, x_start, y_start, angle, range_mes, scan_msg):
+    def ray_trace_update(self, map, log_odds, x_start, y_start, angle, range_mes, is_obstacle):
         """
         A ray tracing grid update as described in the lab document.
 
@@ -160,13 +135,14 @@ class OccupancyGripMap:
         :param y_start: The y starting point in the map coordinate frame (i.e. the y 'pixel' that the robot is in).
         :param angle: The ray angle relative to the x axis of the map.
         :param range_mes: The range of the measurement along the ray.
+        :param is_obstacle: Whether the ray hit an obstacle (True) or reached max range (False).
         :return: The numpy map and the log odds updated along a single ray.
         """
         # Compute endpoint pixel of the ray
         x_end = int(x_start + (range_mes / CELL_SIZE) * np.cos(angle))
         y_end = int(y_start + (range_mes / CELL_SIZE) * np.sin(angle))
 
-        # Get all pixel indices along the ray (skimage line)
+        # Get all pixel indices along the ray (Bresenham line)
         rr, cc = ray_trace(x_start, y_start, x_end, y_end)
 
         # Clip to map bounds
@@ -177,59 +153,29 @@ class OccupancyGripMap:
         if len(rr) == 0:
             return map, log_odds
 
-        # All pixels except the last NUM_PTS_OBSTACLE are free
-        free_rr = rr[:-NUM_PTS_OBSTACLE] if len(rr) > NUM_PTS_OBSTACLE else rr
-        free_cc = cc[:-NUM_PTS_OBSTACLE] if len(cc) > NUM_PTS_OBSTACLE else cc
+        # Free space: all pixels except the last NUM_PTS_OBSTACLE (if obstacle hit)
+        if is_obstacle and len(rr) > NUM_PTS_OBSTACLE:
+            free_rr = rr[:-NUM_PTS_OBSTACLE]
+            free_cc = cc[:-NUM_PTS_OBSTACLE]
+        else:
+            # No obstacle or short ray: entire ray is free space
+            free_rr = rr
+            free_cc = cc
+
         log_odds[free_rr, free_cc] -= BETA
 
-        # Last NUM_PTS_OBSTACLE pixels are occupied (only if ray hit something, not at max range)
-        if not np.isinf(scan_msg.range_max) and range_mes < scan_msg.range_max:
+        # Occupied space: last NUM_PTS_OBSTACLE pixels (only if ray hit an obstacle)
+        if is_obstacle:
             occ_rr = rr[-NUM_PTS_OBSTACLE:]
             occ_cc = cc[-NUM_PTS_OBSTACLE:]
             log_odds[occ_rr, occ_cc] += ALPHA
 
-        # Convert log odds to probability, scale to 0-100 int8
+        # Clamp log odds
+        if CLAMP_LOG_ODDS:
+            np.clip(log_odds[rr, cc], CLAMP_MIN, CLAMP_MAX, out=log_odds[rr, cc])
+
+        # Convert log odds to probability, scale to 0-100
         map[rr, cc] = (self.log_odds_to_probability(log_odds[rr, cc]) * 100).astype(np.int8)
-
-        # Calculate the end position of the ray in meters relative to the map frame
-        width = map.shape[0]
-        height = map.shape[1]
-
-        # Calculate ray end points in pixel coordinates
-        x_end = int(x_start + (range_mes / CELL_SIZE) * np.cos(angle))
-        y_end = int(y_start + (range_mes / CELL_SIZE) * np.sin(angle))
-
-        # Determine the pixels along the ray
-        rr, cc = ray_trace(y_start, x_start, y_end, x_end)
-
-        # Filter pixels outside the map bounds
-        valid_indices = (rr >= 0) & (rr < height) & (cc >= 0) & (cc < width)
-        rr = rr[valid_indices]
-        cc = cc[valid_indices]
-
-        # Update free space: decrement log odds for all but the last few pixels
-        # NUM_PTS_OBSTACLE indicating how many pixels at the end of a LiDAR beam to consider part of the obstacle
-
-        if len(rr) > NUM_PTS_OBSTACLE:
-            rr_free = rr[:-NUM_PTS_OBSTACLE]
-            cc_free = cc[:-NUM_PTS_OBSTACLE]
-            log_odds[cc_free, rr_free] -= BETA
-            if CLAMP_LOG_ODDS:
-                np.clip(log_odds[cc_free, rr_free], CLAMP_MIN, CLAMP_MAX, out=log_odds[cc_free, rr_free])
-
-            probs_free = self.log_odds_to_probability(log_odds[cc_free, rr_free])
-            map[cc_free, rr_free] = (probs_free * 100).astype(np.int8)
-
-        # Update obstacle space: increment log odds for the last few pixels
-        if len(rr) > 0:
-            rr_obs = rr[-NUM_PTS_OBSTACLE:]
-            cc_obs = cc[-NUM_PTS_OBSTACLE:]
-            log_odds[cc_obs, rr_obs] += ALPHA
-            if CLAMP_LOG_ODDS:
-                np.clip(log_odds[cc_obs, rr_obs], CLAMP_MIN, CLAMP_MAX, out=log_odds[cc_obs, rr_obs])
-
-            probs_obs = self.log_odds_to_probability(log_odds[cc_obs, rr_obs])
-            map[cc_obs, rr_obs] = (probs_obs * 100).astype(np.int8)
 
         return map, log_odds
 
