@@ -48,5 +48,5 @@ def plot(bag):
 if __name__ == '__main__':
     rospack = rospkg.RosPack()
     path = rospack.get_path("rob521_lab3")
-    bag = rosbag.Bag(path+"/motion_estimate.bag")
+    bag = rosbag.Bag(path+"/motion_estimate_complex.bag")
     plot(bag)

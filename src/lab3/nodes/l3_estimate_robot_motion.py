@@ -20,8 +20,10 @@ from utils import convert_pose_to_tf, euler_from_ros_quat, ros_quat_from_euler
 
 ENC_TICKS = 4096
 RAD_PER_TICK = 0.001533981
-WHEEL_RADIUS = 0.03253555602291784
-BASELINE = 0.2910671934895311
+#WHEEL_RADIUS = 0.03253555602291784
+WHEEL_RADIUS = 0.032537553948739036
+#BASELINE = 0.2910671934895311
+BASELINE = 0.2900206061928295
 
 
 class WheelOdom:
@@ -51,7 +53,7 @@ class WheelOdom:
         # rosbag
         rospack = rospkg.RosPack()
         path = rospack.get_path("rob521_lab3")
-        self.bag = rosbag.Bag(path+"/motion_estimate.bag", 'w')
+        self.bag = rosbag.Bag(path+"/motion_estimate_complex.bag", 'w')
 
         # reset current odometry to allow comparison with this node
         reset_pub = rospy.Publisher('/reset', Empty, queue_size=1, latch=True)
@@ -80,7 +82,8 @@ class WheelOdom:
             # YOUR CODE HERE!!!
             # Update your odom estimates with the latest encoder measurements and populate the relevant area
             # of self.pose and self.twist with estimated position, heading and velocity
-
+            le = sensor_state_msg.left_encoder
+            re = sensor_state_msg.right_encoder
             # Compute difference in encoder counts
             del_le = le - self.last_enc_l
             del_re = re - self.last_enc_r

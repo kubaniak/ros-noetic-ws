@@ -17,12 +17,12 @@ from utils import convert_pose_to_tf, convert_tf_to_pose, euler_from_ros_quat, \
      tf_to_tf_mat, tf_mat_to_tf
 
 
-ALPHA = 0.2
-BETA = 1
-MAP_DIM = (8, 8)
+ALPHA = 1
+BETA = 0.2
+MAP_DIM = (10, 10)
 CELL_SIZE = .01
-NUM_PTS_OBSTACLE = 3
-SCAN_DOWNSAMPLE = 3
+NUM_PTS_OBSTACLE = 2
+SCAN_DOWNSAMPLE = 2
 CLAMP_LOG_ODDS = True
 CLAMP_MIN = -10
 CLAMP_MAX = 10
@@ -113,7 +113,7 @@ class OccupancyGripMap:
             angle = scan_msg.angle_min + i * scan_msg.angle_increment + odom_map[2]
 
             self.np_map, self.log_odds = self.ray_trace_update(
-                self.np_map, self.log_odds, x_start, y_start, angle, range_mes
+                self.np_map, self.log_odds, x_start, y_start, angle, range_mes, scan_msg
             )
 
         # Origin of the map is stored in self.map_msg.info.origin
@@ -143,14 +143,14 @@ class OccupancyGripMap:
             ray_angle = scan_msg.angle_min + i * scan_msg.angle_increment
             global_angle = robot_angle + ray_angle
 
-            self.np_map, self.log_odds = self.ray_trace_update(self.np_map, self.log_odds, x_start, y_start, global_angle, range_mes)
+            self.np_map, self.log_odds = self.ray_trace_update(self.np_map, self.log_odds, x_start, y_start, global_angle, range_mes, scan_msg)
 
         # publish the message
         self.map_msg.info.map_load_time = rospy.Time.now()
         self.map_msg.data = self.np_map.T.flatten()
         self.map_pub.publish(self.map_msg)
 
-    def ray_trace_update(self, map, log_odds, x_start, y_start, angle, range_mes):
+    def ray_trace_update(self, map, log_odds, x_start, y_start, angle, range_mes, scan_msg):
         """
         A ray tracing grid update as described in the lab document.
 

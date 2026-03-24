@@ -10,7 +10,8 @@ from geometry_msgs.msg import Twist
 INT32_MAX = 2**31
 NUM_ROTATIONS = 3 
 TICKS_PER_ROTATION = 4096
-WHEEL_RADIUS = 0.03253555602291784 #From terminal output of wheel radius calibration node (in meters)
+#WHEEL_RADIUS = 0.03253555602291784 #From terminal output of wheel radius calibration node (in meters)
+WHEEL_RADIUS = 0.032537553948739036
 
 
 class wheelBaselineEstimator():
